@@ -1,4 +1,8 @@
-import { resolveEntryConfig, type Env } from '../lib/entry-config';
+import {
+  resolveEntryConfig,
+  resolveCloudfrontOriginConfig,
+  type Env,
+} from '../lib/entry-config';
 
 /**
  * In-process tests for the entry-mode resolution (lib/entry-config.ts), the
@@ -32,19 +36,116 @@ describe('resolveEntryConfig', () => {
     });
   });
 
-  test('"both" is refused, naming the concrete reason', () => {
+  function bothEnv(overrides: Env = {}): Env {
+    return {
+      STRATOCLAVE_ENTRY: 'both',
+      STRATOCLAVE_PRIVATE_CERTIFICATE_ARN: `arn:aws:acm:${REGION}:123456789012:certificate/11111111-2222-3333-4444-555555555555`,
+      STRATOCLAVE_PRIVATE_DOMAIN: 'stratoclave.internal.example.com',
+      STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: 'arn:aws:iam::123456789012:root',
+      ...overrides,
+    };
+  }
+
+  test('"both" resolves with the same PrivateLink config shape as "private"', () => {
+    const cfg = resolveEntryConfig(bothEnv(), REGION);
+    expect(cfg.mode).toBe('both');
+    if (cfg.mode !== 'both') throw new Error('expected both mode');
+    expect(cfg.privateEntry).toEqual({
+      certificateArn: `arn:aws:acm:${REGION}:123456789012:certificate/11111111-2222-3333-4444-555555555555`,
+      domainName: 'stratoclave.internal.example.com',
+      allowedPrincipals: ['arn:aws:iam::123456789012:root'],
+    });
+  });
+
+  test('"both" requires the same three PrivateLink variables as "private", named the same way', () => {
     expect(() => resolveEntryConfig({ STRATOCLAVE_ENTRY: 'both' }, REGION)).toThrow(
-      /not supported yet/,
-    );
-    expect(() => resolveEntryConfig({ STRATOCLAVE_ENTRY: 'both' }, REGION)).toThrow(
-      /key that works from the internet through CloudFront/,
+      /STRATOCLAVE_PRIVATE_CERTIFICATE_ARN.*STRATOCLAVE_PRIVATE_DOMAIN.*STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS/,
     );
   });
 
-  test('an unrecognised value is refused and mentions "both" is named but unsupported', () => {
+  test('"both"\'s allowed-principals validation is the same function "private" uses (a wildcard is refused)', () => {
+    expect(() =>
+      resolveEntryConfig(bothEnv({ STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: '*' }), REGION),
+    ).toThrow(/must not contain a wildcard/);
+  });
+
+  test('an unrecognised value is refused and lists all three supported modes', () => {
     expect(() => resolveEntryConfig({ STRATOCLAVE_ENTRY: 'nonsense' }, REGION)).toThrow(
-      /must be "cloudfront" or "private"/,
+      /must be "cloudfront", "private", or "both"/,
     );
+  });
+
+  describe('resolveCloudfrontOriginConfig', () => {
+    test('unset defaults to "vpc" under cloudfront', () => {
+      expect(resolveCloudfrontOriginConfig({}, 'cloudfront')).toBe('vpc');
+    });
+
+    test('explicit empty string also defaults to "vpc" under cloudfront', () => {
+      expect(
+        resolveCloudfrontOriginConfig({ STRATOCLAVE_CLOUDFRONT_ORIGIN: '' }, 'cloudfront'),
+      ).toBe('vpc');
+    });
+
+    test('is case-insensitive and tolerates surrounding whitespace', () => {
+      expect(
+        resolveCloudfrontOriginConfig({ STRATOCLAVE_CLOUDFRONT_ORIGIN: '  VPC-Expand ' }, 'cloudfront'),
+      ).toBe('vpc-expand');
+    });
+
+    test('explicit "public" is honoured under cloudfront (the documented fallback)', () => {
+      expect(
+        resolveCloudfrontOriginConfig({ STRATOCLAVE_CLOUDFRONT_ORIGIN: 'public' }, 'cloudfront'),
+      ).toBe('public');
+    });
+
+    test('an unrecognised value is refused, listing the closed set', () => {
+      expect(() =>
+        resolveCloudfrontOriginConfig({ STRATOCLAVE_CLOUDFRONT_ORIGIN: 'nonsense' }, 'cloudfront'),
+      ).toThrow(/must be one of public, vpc-expand, vpc-switch, vpc/);
+    });
+
+    test('unset under "private" defaults to "public" (NOT "vpc" — the regression this guards)', () => {
+      // A plain STRATOCLAVE_ENTRY=private deployment never set this variable
+      // at all before this feature existed. Defaulting it to "vpc" instead
+      // of "public" would have made every such deployment fail at synth the
+      // moment this feature's default changed, with no action on the
+      // operator's part at all.
+      expect(resolveCloudfrontOriginConfig({}, 'private')).toBe('public');
+    });
+
+    test('explicit "vpc" under "private" is still refused (the default is silent-only, not a license)', () => {
+      expect(() =>
+        resolveCloudfrontOriginConfig({ STRATOCLAVE_CLOUDFRONT_ORIGIN: 'vpc' }, 'private'),
+      ).toThrow(/has no effect under STRATOCLAVE_ENTRY=private/);
+    });
+
+    test('explicit "vpc-expand" under "private" is refused', () => {
+      expect(() =>
+        resolveCloudfrontOriginConfig({ STRATOCLAVE_CLOUDFRONT_ORIGIN: 'vpc-expand' }, 'private'),
+      ).toThrow(/has no effect under STRATOCLAVE_ENTRY=private/);
+    });
+
+    test('unset under "both" resolves to "vpc" (forced, matches the only shape "both" builds)', () => {
+      expect(resolveCloudfrontOriginConfig({}, 'both')).toBe('vpc');
+    });
+
+    test('explicit "public" under "both" is refused', () => {
+      expect(() =>
+        resolveCloudfrontOriginConfig({ STRATOCLAVE_CLOUDFRONT_ORIGIN: 'public' }, 'both'),
+      ).toThrow(/is refused under STRATOCLAVE_ENTRY=both/);
+    });
+
+    test('explicit "vpc-expand" under "both" is refused', () => {
+      expect(() =>
+        resolveCloudfrontOriginConfig({ STRATOCLAVE_CLOUDFRONT_ORIGIN: 'vpc-expand' }, 'both'),
+      ).toThrow(/is refused under STRATOCLAVE_ENTRY=both/);
+    });
+
+    test('explicit "vpc" under "both" is allowed', () => {
+      expect(resolveCloudfrontOriginConfig({ STRATOCLAVE_CLOUDFRONT_ORIGIN: 'vpc' }, 'both')).toBe(
+        'vpc',
+      );
+    });
   });
 
   function privateEnv(overrides: Env = {}): Env {

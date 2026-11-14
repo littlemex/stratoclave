@@ -261,6 +261,31 @@ export function impliedRatePer5Min(
   return Math.ceil((target * windowSeconds) / fastestRequestSeconds);
 }
 
+/**
+ * Timeouts shared between the CloudFront-to-ALB hop and the ALB itself,
+ * whichever ALB CloudFront is currently talking to (the public one, or the
+ * internal one over a VPC origin — see `lib/alb-stack.ts`'s `buildAlb` and
+ * `lib/frontend-stack.ts`'s VPC-origin wiring). One constant each, imported
+ * by both files, is what makes "the two paths cannot drift" true by
+ * construction rather than by a comment: there is only one place either
+ * value could change.
+ *
+ * `ORIGIN_READ_TIMEOUT_SECONDS` / `ORIGIN_KEEPALIVE_TIMEOUT_SECONDS`: see the
+ * comment this carries forward in `lib/frontend-stack.ts` for why 60s
+ * (CloudFront's origin read timeout, which is also the gap-between-bytes
+ * timeout, not a whole-response cap — streaming responses rely on the
+ * backend's own keepalive behaviour between bytes, not on this number, for
+ * how long they may run in total).
+ *
+ * `ALB_IDLE_TIMEOUT_SECONDS`: AWS's own ALB default (60s) was previously
+ * left implicit. Making it explicit here, on both ALBs, means a future
+ * change to either path shows up as a template diff instead of silently
+ * drifting from whatever AWS's default happens to be.
+ */
+export const ORIGIN_READ_TIMEOUT_SECONDS = 60;
+export const ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 60;
+export const ALB_IDLE_TIMEOUT_SECONDS = 60;
+
 /** Fargate CPU units in one vCPU. */
 export const CPU_UNITS_PER_VCPU = 1024;
 

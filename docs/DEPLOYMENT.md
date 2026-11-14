@@ -18,15 +18,17 @@ If you only want to use an existing Stratoclave deployment, you do not need this
 5. [Post-deploy: container image](#post-deploy-container-image)
 6. [Post-deploy: quota gated stacks](#post-deploy-quota-gated-stacks)
 7. [Regional constraints](#regional-constraints)
-8. [Private entry (PrivateLink), headless](#private-entry-privatelink-headless)
-9. [Cost estimate](#cost-estimate)
-10. [Updates and re-deploys](#updates-and-re-deploys)
-11. [Local development](#local-development)
-12. [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)
-13. [Rate limits on sign-in routes](#rate-limits-on-sign-in-routes)
-14. [Backend environment variables](#backend-environment-variables)
-15. [Teardown](#teardown)
-16. [Troubleshooting](#troubleshooting)
+8. [VPC origin](#vpc-origin)
+9. [Private entry (PrivateLink), headless](#private-entry-privatelink-headless)
+10. [Both: CloudFront and PrivateLink together](#both-cloudfront-and-privatelink-together)
+11. [Cost estimate](#cost-estimate)
+12. [Updates and re-deploys](#updates-and-re-deploys)
+13. [Local development](#local-development)
+14. [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)
+15. [Rate limits on sign-in routes](#rate-limits-on-sign-in-routes)
+16. [Backend environment variables](#backend-environment-variables)
+17. [Teardown](#teardown)
+18. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -89,7 +91,7 @@ A successful `deploy-all.sh` run provisions **nine CloudFormation stacks** in de
 
 Several archived stacks (RDS, Redis, CodeBuild, Verified Permissions) live under `iac/lib/_archived/` and are **not** deployed by default. They are kept for reference. The previous `WafStack` archive has been superseded by the live CLOUDFRONT-scope WAF described above.
 
-The nine-stack table above is `STRATOCLAVE_ENTRY=cloudfront`, the default. `STRATOCLAVE_ENTRY=private` builds a different, fresh deployment with no `WafStack` and no `FrontendStack` at all, and an internal (not internet-facing) `AlbStack`; in their place it adds a `<Prefix>PrivateLinkStack` (internal NLB + VPC endpoint service). See [Private entry (PrivateLink), headless](#private-entry-privatelink-headless).
+The nine-stack table above is `STRATOCLAVE_ENTRY=cloudfront`, the default — with `STRATOCLAVE_CLOUDFRONT_ORIGIN` also at its default, `vpc`, `<Prefix>AlbStack` builds an internal (not internet-facing) ALB reached by CloudFront through a VPC origin; see [VPC origin](#vpc-origin). `STRATOCLAVE_ENTRY=private` builds a different, fresh deployment with no `WafStack` and no `FrontendStack` at all, and an internal `AlbStack`; in their place it adds a `<Prefix>PrivateLinkStack` (internal NLB + VPC endpoint service). See [Private entry (PrivateLink), headless](#private-entry-privatelink-headless). `STRATOCLAVE_ENTRY=both` builds every stack both of the above need, sharing one internal `AlbStack` between CloudFront and PrivateLink; see [Both](#both-cloudfront-and-privatelink-together).
 
 ### Synth-time security checks (cdk-nag)
 
@@ -520,6 +522,204 @@ benign.
 
 ---
 
+## VPC origin
+
+`STRATOCLAVE_CLOUDFRONT_ORIGIN` controls whether the ALB behind CloudFront
+has a public address at all. The default, `vpc`, means it does not: the ALB
+is internal, and CloudFront reaches it through a CloudFront VPC origin
+(`AWS::CloudFront::VpcOrigin`) rather than by the ALB's public DNS name.
+
+### What this gives
+
+- The ALB has no public address. It cannot be reached by its DNS name from
+  outside this account's VPC.
+- The API is reachable only through CloudFront distributions in this AWS
+  account that reference this VPC origin.
+- There is no shared secret between CloudFront and the ALB, and nothing to
+  rotate. The previous design for this (a CloudFront custom origin header
+  compared against a value held in Secrets Manager) is not used; closing the
+  bypass by network reachability removes the two-copy-secret failure mode
+  entirely, not just one instance of it.
+
+### What this does not give
+
+- **Same-account bypass.** Any principal in this account with
+  `cloudfront:CreateDistribution` or `cloudfront:UpdateDistribution` can
+  attach a new or existing distribution to the same VPC origin, with no WAF
+  of its own. The VPC origin is never shared outside the account: do not use
+  AWS Resource Access Manager (RAM) to share it. A principal with that
+  permission can already detach the WebACL from the existing distribution or
+  edit the ALB's security group directly, so this is not a new privilege
+  boundary; it is the same one the rest of the account already has.
+- **Encryption on the CloudFront-to-ALB hop.** That hop is HTTP on the
+  private VPC-origin path, not HTTPS. No certificate can be issued for an
+  internal ALB's `internal-*.elb.amazonaws.com` DNS name, so there is no TLS
+  option on this path. The viewer-to-CloudFront hop is unaffected
+  (`https-only` on every API behaviour, regardless of this setting).
+- **Private ECS tasks.** The ECS tasks still run in public subnets with
+  public IPs, for Bedrock egress with no NAT gateway. This setting changes
+  only the ALB's reachability, not the tasks'.
+- **WAF coverage of the PrivateLink path.** Under `STRATOCLAVE_ENTRY=both`
+  (see [Both](#both-cloudfront-and-privatelink-together)), PrivateLink
+  traffic reaches the same ALB without passing through CloudFront or its
+  WAF. Application authentication still applies to every route in every
+  mode.
+
+### Availability Zone limitation
+
+CloudFront VPC origins are not supported in these Availability Zone IDs:
+`use1-az3` (us-east-1), `apne1-az3` (ap-northeast-1), `usw1-az2`
+(us-west-1), `cac1-az3` (ca-central-1). AZ IDs are per-account; the same AZ
+*name* (e.g. `us-east-1a`) can map to a different AZ ID in different
+accounts, so the VPC's AZ choice must be checked per account, not assumed
+from the name.
+
+`iac/scripts/deploy-all.sh` checks this for an existing deployment before
+every `vpc`-ish deploy (every value except `public`), resolving the AZ IDs
+of the subnets the internal ALB will use and refusing if any is
+unsupported. Do not work around a refusal by setting an AZ choice in shell
+environment variables — an operator can forget to set it again on a later
+deploy, silently moving the VPC's subnets. Pin Availability Zones in
+committed CDK context instead, in `iac/cdk.json`:
+
+```json
+{
+  "context": {
+    "availability-zones:account=111111111111:region=us-east-1": [
+      "us-east-1a",
+      "us-east-1b"
+    ]
+  }
+}
+```
+
+If an existing deployment's VPC already sits in an unsupported AZ, it
+cannot move there without replacing its subnets. `STRATOCLAVE_CLOUDFRONT_ORIGIN=public`
+remains the supported path for that account; it never builds a CloudFront
+VPC origin or the isolated subnets it needs.
+
+### Migrating an existing public deployment to a VPC origin
+
+A fresh deployment needs no migration: `STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc`
+(the default) builds the internal ALB and the VPC origin directly.
+
+An **existing** deployment whose ALB is internet-facing cannot jump to `vpc`
+in one deploy — the ALB's internet-facing/internal scheme cannot change in
+place (CloudFormation replaces the load balancer), and the replacement has
+to exist, be registered with CloudFront, and be healthy before the old one
+can safely be removed. Migrate through three states, each its own deploy:
+
+```bash
+export STRATOCLAVE_PREFIX=stratoclave
+export STRATOCLAVE_REGION=us-east-1
+
+export STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-expand
+cd iac && npx cdk deploy --all --require-approval never
+
+export STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-switch
+npx cdk deploy --all --require-approval never
+
+export STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc
+npx cdk deploy --all --require-approval never
+```
+
+What each step does:
+
+- **`vpc-expand`**: adds the isolated subnets, the internal ALB, its own
+  target group, and the CloudFront VPC origin resource. The ECS service
+  registers with both target groups. The existing public ALB, its target
+  group, and its CloudFront origin are untouched, and every request still
+  goes through the public ALB exactly as before. `AWS::CloudFront::VpcOrigin`
+  creation takes several minutes; this step lets it finish, and lets the
+  internal ALB's targets pass their health checks, before anything depends
+  on either.
+- **`vpc-switch`**: the distribution's four ALB behaviours (`/api/*`,
+  `/v1/*`, `/openai/*`, `/.well-known/*`) retarget from the public origin to
+  the VPC origin. **This is the step that moves live traffic.** The old
+  public ALB, its target group, and its now-unreferenced CloudFront origin
+  are still declared, so reverting to the public origin is a redeploy of the
+  previous step's configuration, not a rebuild.
+- **`vpc`**: the public ALB, its target group, its CloudFront origin, and
+  its `AlbDnsName` export are removed. **This is the step that closes the
+  public bypass** — before it, the public ALB still has a public address and
+  a third party's own CloudFront distribution could still reach it directly,
+  even though no production traffic is routed to it after `vpc-switch`.
+
+A bare `cdk deploy --all` (or `./iac/scripts/deploy-all.sh`) with none of
+these variables set resolves to `vpc` — the default. Run against an existing
+deployment that still has a live internet-facing ALB and has never run
+`vpc-expand`/`vpc-switch`, that would attempt the one-shot replacement this
+staged migration exists to avoid. `iac/scripts/deploy-all.sh`'s pre-flight
+refuses that specific combination (a live internet-facing ALB, no internal
+ALB yet, and a target state of `vpc-switch` or `vpc`) before `cdk deploy`
+runs at all. A fresh deployment, or an existing one already partway through
+this migration, is unaffected by the refusal.
+
+### Rollback
+
+- From `vpc-expand`: redeploy `STRATOCLAVE_CLOUDFRONT_ORIGIN=public`. The
+  public ALB was never touched, so this removes only the internal ALB and
+  the VPC origin.
+- From `vpc-switch`: redeploy `STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-expand`.
+  The behaviours retarget back to the public origin; both ALBs remain.
+- From `vpc`: there is no rollback deploy, because the public ALB no longer
+  exists. Restoring it means running the migration again from the start
+  under the same prefix (`vpc-expand` then `vpc-switch`), which creates a
+  new public ALB — it does not restore the old one's DNS name.
+
+### Cost and deploy time
+
+- Two ALBs exist simultaneously during `vpc-expand` and `vpc-switch`. Budget
+  for both until the `vpc` step removes the old one.
+- `AWS::CloudFront::VpcOrigin` creation and deletion are each on the order
+  of several minutes, independent of how fast the rest of a deploy
+  completes.
+- No additional per-request charge applies to a VPC origin; the internet-facing
+  ALB's public IPv4 address charge no longer applies once it is removed in
+  the `vpc` step.
+
+### Verifying a deployment
+
+For a fresh `vpc` deployment, after `cdk deploy --all` completes:
+
+```bash
+export STRATOCLAVE_PREFIX=stratoclave
+export STRATOCLAVE_REGION=us-east-1
+aws elbv2 describe-load-balancers --region "$STRATOCLAVE_REGION" \
+  --query "LoadBalancers[?contains(LoadBalancerName,'${STRATOCLAVE_PREFIX}')].{Name:LoadBalancerName,Scheme:Scheme}"
+```
+
+Confirm the ALB's `Scheme` is `internal` and that no load balancer in the
+account is named `<prefix>-alb` with `Scheme` `internet-facing`.
+
+For a migration, probe the distribution through `vpc-switch` with a
+multi-minute streaming request held open across the deploy, not only a
+short request, since the origin read/keepalive timeouts and the backend's
+own streaming behaviour are what a short probe cannot exercise:
+
+```bash
+curl -N -H "Authorization: Bearer $API_KEY" \
+  https://<cloudfront-domain>/v1/messages \
+  -d '{"model":"...","stream":true,"max_tokens":4096,"messages":[{"role":"user","content":"count slowly to 50"}]}' \
+  -H "content-type: application/json"
+```
+
+To verify the public bypass is actually closed after the `vpc` step, point
+a second CloudFront distribution at the old public ALB's DNS name and
+confirm it cannot be created against a VPC origin it was never shared
+(RAM) to, and that the DNS name itself no longer resolves to a live load
+balancer:
+
+```bash
+aws elbv2 describe-load-balancers --region "$STRATOCLAVE_REGION" \
+  --query "LoadBalancers[?LoadBalancerName=='${STRATOCLAVE_PREFIX}-alb']"
+```
+
+An empty result confirms the public ALB from before the migration no
+longer exists.
+
+---
+
 ## Private entry (PrivateLink), headless
 
 By default Stratoclave's only entry point is CloudFront, which cannot be made
@@ -570,11 +770,9 @@ redirect could run. `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS` is a
 comma-separated list of IAM principal ARNs (an account root, a role, or a
 user) allowed to request a connection to the endpoint service; it must be
 non-empty and must never contain a wildcard, which `cdk synth` refuses
-outright. `STRATOCLAVE_ENTRY=both` is named but refused at synth for now: as
-specified it would add reach without removing any — a key meant to stay
-private would still work from the internet through CloudFront — and it needs
-a second internal ALB and a way to tell which entry a request arrived on,
-neither of which this slice builds.
+outright. `STRATOCLAVE_ENTRY=both` runs CloudFront and PrivateLink
+side by side on one shared internal ALB; see [Both: CloudFront and
+PrivateLink together](#both-cloudfront-and-privatelink-together).
 
 ### What gets built
 
@@ -867,6 +1065,114 @@ the same VPC, is plain HTTP, exactly as it is on the `cloudfront` path.
 
 ---
 
+## Both: CloudFront and PrivateLink together
+
+`STRATOCLAVE_ENTRY=both` puts CloudFront (through a VPC origin) and
+PrivateLink on the same internal ALB and the same backend. It needs the
+same three `STRATOCLAVE_PRIVATE_*` variables as `STRATOCLAVE_ENTRY=private`
+(the PrivateLink leg is configured identically either way), plus WAF and the
+web console from the `cloudfront` path:
+
+```bash
+export STRATOCLAVE_ENTRY=both
+export STRATOCLAVE_PRIVATE_CERTIFICATE_ARN=arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-0000-0000-000000000000
+export STRATOCLAVE_PRIVATE_DOMAIN=stratoclave.internal.example.com
+export STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS=arn:aws:iam::222222222222:root
+./iac/scripts/deploy-all.sh
+```
+
+`STRATOCLAVE_CLOUDFRONT_ORIGIN` is forced to `vpc` in this mode and refuses
+every other value: `both`'s whole point is that the ALB has no public
+address, so there is nothing for `public`/`vpc-expand`/`vpc-switch` to
+describe a state of.
+
+### The ALB has two front doors
+
+The shared internal ALB listens on two ports:
+
+- **Port 80**, a plain HTTP forward (never a redirect to :443 — a redirect
+  would break CloudFront's VPC-origin traffic, which expects a response on
+  this port, not a 301). CloudFront's VPC origin reaches this listener.
+- **Port 443**, HTTPS with your `STRATOCLAVE_PRIVATE_CERTIFICATE_ARN`. The
+  internal NLB (PrivateLink publication) reaches this listener.
+
+The ALB security group admits the CloudFront origin-facing managed prefix
+list on port 80 and the internal NLB's security group on port 443 — the
+union of what each path needs on its own, never a shared rule.
+
+### What passes WAF, and what does not
+
+Requests through the CloudFront distribution pass the WAFv2 WebACL (rate
+limiting and managed rules) before reaching the ALB. Requests through
+PrivateLink reach the ALB directly and do not pass through CloudFront or
+WAF at all — the same posture `STRATOCLAVE_ENTRY=private` has on its own.
+Application authentication applies on every route regardless of which path
+a request arrived on.
+
+### Client address and rate limiting
+
+The ALB-wide `X-Forwarded-For` processing attribute is left at AWS's
+default (`append`), not set to `remove` the way a pure `private` deployment
+sets it: the CloudFront leg needs the viewer's address for unauthenticated
+rate limiting, and that attribute is per ALB, not per listener, so it
+cannot be `remove` for one leg and `append` for the other.
+
+On the PrivateLink leg, any `X-Forwarded-For` entry on an inbound request is
+not trustworthy — it was not written by a hop this deployment's topology
+trusts. The backend distinguishes the two legs using `X-Forwarded-Port`, an
+ALB-set header that always carries the port of the listener that accepted
+the connection. It is never a value a client can supply: unlike
+`X-Forwarded-For`, there is no "preserve" mode for it — see the
+[X-Forwarded-Port
+documentation](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/x-forwarded-headers.html#x-forwarded-port).
+The match is positive, not a deny-list: only a request whose
+`X-Forwarded-Port` is exactly `80` (the CloudFront leg), or whose header is
+absent entirely (every entry mode but `both` never sends this header in a
+test fixture, and must not have its behaviour changed by this check's mere
+existence), keeps the deployment's configured `RATE_LIMIT_TRUSTED_HOPS`.
+Every other value — a confirmed `443` (PrivateLink), or anything this check
+does not recognise — is treated as if `RATE_LIMIT_TRUSTED_HOPS=0` had been
+set for that one request only. See `backend/core/forwarded_port.py` and
+`backend/core/rate_limit.py`'s `_effective_trusted_hops`.
+
+On the PrivateLink leg, the ALB's own observed peer address (what
+`RATE_LIMIT_TRUSTED_HOPS=0` falls back to) is the internal NLB's node
+address, not the PrivateLink consumer's own address — PrivateLink traffic
+to an ALB-type NLB target reaches the target from the NLB's own ENIs, not
+the original client's. Every consumer behind the same NLB AZ shares one
+rate-limit bucket on this leg, the same coarseness a pure `private`
+deployment already has and for the same reason.
+
+### The API endpoint returned to clients
+
+`/.well-known/stratoclave-config` returns one `api_endpoint`. In this mode,
+two candidate endpoints are configured on the container
+(`STRATOCLAVE_API_ENDPOINT`, the CloudFront URL, and
+`STRATOCLAVE_API_ENDPOINT_PRIVATE`, the PrivateLink URL), and the backend
+selects between them by the same `X-Forwarded-Port` signal described above
+— never by reading a URL out of a request header. A request on the
+PrivateLink leg receives the PrivateLink URL; every other request receives
+the CloudFront URL. See `backend/mvp/well_known.py`'s
+`_derive_api_endpoint`.
+
+`CORS_ORIGINS` is the CloudFront domain only. The PrivateLink path is
+headless (no web console), so it needs no CORS grant of its own.
+
+`STRATOCLAVE_STS_AUDIENCES` is set to the comma-joined pair of the
+CloudFront URL and the PrivateLink URL. As of this writing the backend on
+`main` does not read this variable; it is wired here ahead of the sign-in
+audience allow-list it is intended for, so that change only has to add the
+read, not the IaC plumbing.
+
+### Access logs
+
+The shared internal ALB has real access logs enabled (an S3 bucket this
+stack creates), the same as a pure `private` deployment and for the same
+reason: the PrivateLink leg never touches CloudFront, so CloudFront's edge
+logs do not cover it.
+
+---
+
 ## Cost estimate
 
 Representative monthly spend for a low-traffic single-team deployment in `us-east-1`. Figures are USD and **exclude Bedrock token usage**, which is billed separately by AWS.
@@ -1067,10 +1373,13 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `DYNAMODB_API_KEYS_TABLE`                | yes                     | yes         | |
 | `CORS_ORIGINS`                           | yes (no `localhost`)    | yes         | Must match the CloudFront domain in production. Dev/local backends can set `http://localhost:3003`. |
 | `DYNAMODB_SSO_NONCES_TABLE`              | optional                | yes (default `stratoclave-sso-nonces`) | Vouch-by-STS replay defence (`backend/dynamo/sso_nonces.py`). If the table is missing, the backend logs a warning and falls back to the ±5 minute skew check only. |
-| `STRATOCLAVE_ENTRY`                      | IaC-only                | n/a         | `cloudfront` (default) or `private` (see [Private entry](#private-entry-privatelink-headless)). `both` is named but refused at synth. |
-| `STRATOCLAVE_PRIVATE_CERTIFICATE_ARN`    | required for `private`  | n/a         | ACM certificate for the internal ALB's HTTPS :443 listener. |
-| `STRATOCLAVE_PRIVATE_DOMAIN`             | required for `private`  | no          | The operator's domain name for the PrivateLink publication. Not itself set on the container; CDK composes `https://<this>` into `STRATOCLAVE_API_ENDPOINT` and `CORS_ORIGINS` instead. |
-| `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS` | required for `private`  | n/a         | Comma-separated IAM principal ARNs allowed to request a connection to the endpoint service. Must be non-empty; a wildcard is refused at synth. |
+| `STRATOCLAVE_ENTRY`                      | IaC-only                | n/a         | `cloudfront` (default), `private`, or `both` (see [Private entry](#private-entry-privatelink-headless) and [Both](#both-cloudfront-and-privatelink-together)). |
+| `STRATOCLAVE_CLOUDFRONT_ORIGIN`          | IaC-only                | n/a         | `vpc` (default), `public`, `vpc-expand`, or `vpc-switch`. Only meaningful under `STRATOCLAVE_ENTRY=cloudfront` (refused under `private`; forced to `vpc` under `both`). See [VPC origin](#vpc-origin). |
+| `STRATOCLAVE_PRIVATE_CERTIFICATE_ARN`    | required for `private`/`both` | n/a   | ACM certificate for the internal ALB's HTTPS :443 listener. |
+| `STRATOCLAVE_PRIVATE_DOMAIN`             | required for `private`/`both` | no    | The operator's domain name for the PrivateLink publication. Not itself set on the container; CDK composes `https://<this>` into `STRATOCLAVE_API_ENDPOINT` (`private`) or `STRATOCLAVE_API_ENDPOINT_PRIVATE` (`both`) instead. |
+| `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS` | required for `private`/`both` | n/a   | Comma-separated IAM principal ARNs allowed to request a connection to the endpoint service. Must be non-empty; a wildcard is refused at synth. |
+| `STRATOCLAVE_API_ENDPOINT_PRIVATE`       | IaC-only                | yes (`both` only) | The PrivateLink URL, set alongside `STRATOCLAVE_API_ENDPOINT` (the CloudFront URL) only under `STRATOCLAVE_ENTRY=both`. `backend/mvp/well_known.py` returns this one instead of `STRATOCLAVE_API_ENDPOINT` when the request's `X-Forwarded-Port` is `443`. See [Both](#both-cloudfront-and-privatelink-together). |
+| `STRATOCLAVE_STS_AUDIENCES`              | IaC-only                | yes (`both` only) | Comma-joined CloudFront URL and PrivateLink URL. Forward-wiring: not read by the backend on `main` as of this writing; see [Both](#both-cloudfront-and-privatelink-together). |
 | `ENABLE_WAF`                             | IaC-only                | n/a         | CDK-side flag (read in `iac/bin/iac.ts`). `false` skips provisioning `<Prefix>WafStack`. Default: `true`. Has no effect under `STRATOCLAVE_ENTRY=private`, which never provisions a WAF stack at all. |
 | `WAF_RATE_LIMIT_PER_5MIN`                | IaC-only                | n/a         | Per-IP request cap in the rate-based rule. Default: `300`. |
 | `WAF_IP_ALLOWLIST_ENABLED`               | IaC-only                | n/a         | Enable SSM-parameter-backed IPSet allowlist. Default: `false`. |

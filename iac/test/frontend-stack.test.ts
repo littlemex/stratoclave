@@ -14,6 +14,7 @@ describe('FrontendStack (P1-2 security headers + P3 OAC)', () => {
       env: { account: '123456789012', region: 'us-east-1' },
       prefix: 'stratoclave',
       albDnsName: 'test-alb-123456789.us-east-1.elb.amazonaws.com',
+      cloudfrontOrigin: 'public',
       webAclArn:
         'arn:aws:wafv2:us-east-1:123456789012:global/webacl/stratoclave-frontend-acl/abcd-1234',
     });
@@ -153,6 +154,7 @@ describe('FrontendStack (P1-2 security headers + P3 OAC)', () => {
       crossRegionReferences: true,
       prefix: 'stratoclave',
       albDnsName: 'test-alb-123456789.eu-west-1.elb.amazonaws.com',
+      cloudfrontOrigin: 'public',
       webAclArn:
         'arn:aws:wafv2:us-east-1:123456789012:global/webacl/stratoclave-frontend-acl/abcd-1234',
     });
@@ -184,6 +186,7 @@ describe('FrontendStack (P1-2 security headers + P3 OAC)', () => {
           // No env → region is an unresolved token.
           prefix: 'stratoclave',
           albDnsName: 'test-alb.example.elb.amazonaws.com',
+          cloudfrontOrigin: 'public',
         }),
     ).toThrow(/explicit region/);
   });

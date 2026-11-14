@@ -10,11 +10,16 @@ set -euo pipefail
 # reference (`frontendStack.cfnDistribution.attrDomainName`), so no second
 # Cognito deploy is necessary.
 #
-# Stack order, `STRATOCLAVE_ENTRY=cloudfront` (default; see iac/bin/iac.ts):
+# Stack order, `STRATOCLAVE_ENTRY=cloudfront` (default; see iac/bin/iac.ts).
+# `STRATOCLAVE_CLOUDFRONT_ORIGIN` (default: `vpc`) decides whether
+# <Prefix>AlbStack builds a public ALB, an internal one, or both at once —
+# see that variable's own entry below and docs/DEPLOYMENT.md's "VPC origin"
+# section; it does not change this stack LIST, only what AlbStack and
+# FrontendStack build inside it:
 #   1. <Prefix>NetworkStack
 #   2. <Prefix>DynamodbStack
 #   3. <Prefix>EcrStack
-#   4. <Prefix>AlbStack           (internet-facing)
+#   4. <Prefix>AlbStack           (public ALB, internal ALB, or both — see STRATOCLAVE_CLOUDFRONT_ORIGIN)
 #   5. <Prefix>WafStack           (CLOUDFRONT scope, us-east-1)
 #   6. <Prefix>FrontendStack      (S3 + CloudFront)
 #   7. <Prefix>CognitoStack       (receives CloudFront domain via cross-stack)
@@ -38,6 +43,22 @@ set -euo pipefail
 # upload, CloudFront invalidation) are skipped entirely — there is no S3
 # bucket or CloudFront distribution to put anything into. See
 # docs/DEPLOYMENT.md, "Private entry (PrivateLink), headless".
+#
+# Stack order, `STRATOCLAVE_ENTRY=both` (CloudFront VPC origin + PrivateLink,
+# one shared internal ALB and one backend):
+#   1. <Prefix>NetworkStack
+#   2. <Prefix>DynamodbStack
+#   3. <Prefix>EcrStack
+#   4. <Prefix>AlbStack           (internal only; :80 for the VPC origin, :443 for PrivateLink)
+#   5. <Prefix>WafStack           (CLOUDFRONT scope, us-east-1)
+#   6. <Prefix>FrontendStack      (S3 + CloudFront, via a VPC origin)
+#   7. <Prefix>PrivateLinkStack   (internal NLB + VPC endpoint service)
+#   8. <Prefix>CognitoStack
+#   9. <Prefix>EcsStack
+#  10. <Prefix>ConfigStack
+# Frontend build/upload/invalidation (steps 10/11 above) run, same as
+# `cloudfront`: the web console is reachable through CloudFront in this
+# mode too. See docs/DEPLOYMENT.md, "both".
 #
 # ECR push ordering (same in BOTH entry modes, not affected by this
 # variable): this script deploys infrastructure only. The ECS service in
@@ -67,11 +88,26 @@ set -euo pipefail
 #
 # Environment variables:
 #   AWS_PROFILE           AWS profile (optional)
-#   STRATOCLAVE_ENTRY     'cloudfront' (default) or 'private'. Switching an
-#                         EXISTING deployment between the two is refused by
-#                         the pre-flight check below — it would replace the
-#                         live ALB in place and take the deployment down.
-#                         Deploy the other mode under a fresh STRATOCLAVE_PREFIX.
+#   STRATOCLAVE_ENTRY     'cloudfront' (default), 'private', or 'both'.
+#                         Switching an EXISTING deployment between these is
+#                         refused by the pre-flight check below — it would
+#                         replace the live ALB in place and take the
+#                         deployment down. Deploy the other mode under a
+#                         fresh STRATOCLAVE_PREFIX.
+#   STRATOCLAVE_CLOUDFRONT_ORIGIN
+#                         'public' | 'vpc-expand' | 'vpc-switch' | 'vpc'
+#                         (default: 'vpc'). Only meaningful under
+#                         STRATOCLAVE_ENTRY=cloudfront (refused under
+#                         'private'; forced to 'vpc' under 'both'). A fresh
+#                         deployment may set 'vpc' directly (the default);
+#                         an EXISTING 'public' deployment must migrate
+#                         through 'vpc-expand' -> 'vpc-switch' -> 'vpc', each
+#                         as its own deploy — the pre-flight check below
+#                         refuses a run that would skip a step. 'public'
+#                         remains a supported, documented fallback (e.g. for
+#                         an account whose VPC sits in an Availability Zone
+#                         VPC origins do not support). See
+#                         docs/DEPLOYMENT.md, "VPC origin".
 #   STRATOCLAVE_REGION    Body-stack deploy region R (default: us-east-1). The
 #                         WAF stack is always us-east-1 (CLOUDFRONT scope); when
 #                         R != us-east-1 you must `cdk bootstrap` BOTH regions.
@@ -84,6 +120,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IAC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$IAC_DIR/.." && pwd)"
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
+# shellcheck source=lib/cloudfront-origin.sh
+source "$SCRIPT_DIR/lib/cloudfront-origin.sh"
 # Body region R: the frontend S3 bucket and all queried stacks (network,
 # dynamodb, ecr, alb, frontend, cognito, ecs, config) live here. Only the WAF
 # stack lives in us-east-1; this script never queries it, so REGION == R.
@@ -100,15 +138,35 @@ PREFIX="${STRATOCLAVE_PREFIX:-stratoclave}"
 # specifically to refuse. Any other value (a typo, "both") is rejected here
 # the same way `resolveEntryConfig` rejects it in the app, rather than
 # silently falling through to the cloudfront plan under `--dry-run`.
-ENTRY="$(printf '%s' "${STRATOCLAVE_ENTRY:-cloudfront}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+ENTRY="$(cfo_normalize "${STRATOCLAVE_ENTRY:-cloudfront}")"
 ENTRY="${ENTRY:-cloudfront}"
-case "$ENTRY" in
-  cloudfront|private) ;;
-  *)
-    echo "[ERROR] STRATOCLAVE_ENTRY must be cloudfront or private (got '${STRATOCLAVE_ENTRY}')" >&2
-    exit 1
-    ;;
-esac
+cfo_validate_entry "$ENTRY" || {
+  echo "[ERROR] STRATOCLAVE_ENTRY must be cloudfront, private, or both (got '${STRATOCLAVE_ENTRY}')" >&2
+  exit 1
+}
+
+# Normalised and validated IDENTICALLY to `resolveCloudfrontOriginConfig`
+# (iac/lib/entry-config.ts): trim whitespace, lowercase, empty-or-unset
+# default is "vpc" (the ALB CloudFront talks to has no public address), then
+# only the closed four-value set is accepted. Refused in the same two
+# combinations the app itself refuses — ENTRY=private with anything but
+# "public", ENTRY=both with anything but "vpc" — so a mistake here is a
+# synth-time error from `cdk deploy`, not a silent divergence between what
+# this script assumed and what the app actually built. Both the validation
+# and the combo check are the SAME functions `test-cloudfront-origin-guard.sh`
+# exercises directly, in `scripts/lib/cloudfront-origin.sh`.
+CLOUDFRONT_ORIGIN="$(cfo_normalize "${STRATOCLAVE_CLOUDFRONT_ORIGIN:-}")"
+if [ -z "$CLOUDFRONT_ORIGIN" ]; then
+  CLOUDFRONT_ORIGIN="$(cfo_default_origin "$ENTRY")"
+fi
+cfo_validate_origin "$CLOUDFRONT_ORIGIN" || {
+  echo "[ERROR] STRATOCLAVE_CLOUDFRONT_ORIGIN must be public, vpc-expand, vpc-switch, or vpc (got '${STRATOCLAVE_CLOUDFRONT_ORIGIN}')" >&2
+  exit 1
+}
+COMBO_ERROR="$(cfo_check_combo "$ENTRY" "$CLOUDFRONT_ORIGIN")" || {
+  echo "[ERROR] $COMBO_ERROR" >&2
+  exit 1
+}
 SKIP_BUILD=false
 DRY_RUN=false
 DEPLOYMENT_LOG="$IAC_DIR/deploy-$(date +%Y%m%d-%H%M%S).log"
@@ -272,7 +330,16 @@ check_alb_scheme_guard() {
     return 0
   fi
   local expected_scheme
-  if [ "$ENTRY" = "private" ]; then expected_scheme="internal"; else expected_scheme="internet-facing"; fi
+  # `both`'s shared ALB is internal (same as `private`): there is no public
+  # ALB at all under `both`, and the one it builds is never named
+  # `${PREFIX}-alb` (CDK-generated name — see lib/alb-stack.ts). Checking
+  # the resource literally named `${PREFIX}-alb` is still correct here: if
+  # ONE exists under that name and is `internet-facing`, it is the OLD
+  # public ALB from a prior `cloudfront`/`public` deployment of this same
+  # prefix, which flipping straight to `both` would try to replace in
+  # place exactly like the `cloudfront` <-> `private` case this guard
+  # already covers.
+  if [ "$ENTRY" = "private" ] || [ "$ENTRY" = "both" ]; then expected_scheme="internal"; else expected_scheme="internet-facing"; fi
   local actual_scheme
   actual_scheme=$(aws elbv2 describe-load-balancers \
     --names "$ALB_STACK" --region "$REGION" \
@@ -295,6 +362,127 @@ check_alb_scheme_guard() {
 }
 check_alb_scheme_guard
 
+# cloudfrontOrigin migration guard. ENTRY=cloudfront's PUBLIC ALB is ALWAYS
+# named exactly "${PREFIX}-alb" when it exists (lib/alb-stack.ts's primary
+# build sets `loadBalancerName` explicitly); the INTERNAL ALB never is
+# (CDK-generated name). So a load balancer found under that literal name,
+# reporting `internet-facing`, means "this deployment currently has a live
+# public ALB" regardless of what CLOUDFRONT_ORIGIN this run is about to set
+# it to — which is exactly the fact this guard needs.
+#
+# Refuses a run that would, in one step, both remove that live public ALB
+# AND stand up the internal one for the first time — the unsafe one-shot
+# replacement the vpc-expand -> vpc-switch -> vpc staging exists to avoid
+# (see docs/DEPLOYMENT.md's migration section). Whether the internal ALB
+# already exists (meaning vpc-expand/vpc-switch already ran at least once)
+# is read from AlbStack's own `InternalAlbDnsName` CloudFormation output,
+# not re-derived — that output exists if and only if lib/alb-stack.ts's
+# internal-ALB branch built one on the LAST successful deploy.
+#
+# Runs even under --dry-run, same reasoning as `check_alb_scheme_guard`
+# above: a dry-run plan must not show a run the real invocation would
+# refuse.
+# The actual AWS-querying wrapper; the decision itself is
+# `cfo_migration_decision` (scripts/lib/cloudfront-origin.sh), tested there
+# directly with no AWS calls at all.
+check_cloudfront_origin_migration_guard() {
+  if [ "$ENTRY" != "cloudfront" ]; then
+    # `private` has no CloudFront origin at all; `both` is refused above
+    # unless CLOUDFRONT_ORIGIN=vpc, and a `cloudfront` -> `both` flip is
+    # already caught by `check_alb_scheme_guard`'s own ENTRY-switch logic
+    # (both resolve to an "internal" expected scheme).
+    return 0
+  fi
+  if ! stack_exists "$ALB_STACK"; then
+    return 0
+  fi
+  local live_public_scheme
+  live_public_scheme=$(aws elbv2 describe-load-balancers \
+    --names "${PREFIX}-alb" --region "$REGION" \
+    --query 'LoadBalancers[0].Scheme' --output text 2>/dev/null)
+  local live_internal_dns live_internal_alb_present
+  live_internal_dns=$(get_stack_output "$ALB_STACK" "InternalAlbDnsName")
+  if [ -n "$live_internal_dns" ]; then live_internal_alb_present="true"; else live_internal_alb_present="false"; fi
+
+  local msg
+  if msg="$(cfo_migration_decision "$CLOUDFRONT_ORIGIN" "$live_public_scheme" "$live_internal_alb_present")"; then
+    return 0
+  fi
+  if [ "$DRY_RUN" = true ]; then
+    log_warn "$msg"
+    log_warn "  (--dry-run does not stop here; the real invocation would refuse with exit 1.)"
+  else
+    log_error "$msg"
+    exit 1
+  fi
+}
+check_cloudfront_origin_migration_guard
+
+# AZ pre-flight (vpc-ish cloudfrontOrigin modes only: VPC origins are
+# unsupported in a handful of specific AZ IDs — use1-az3, apne1-az3,
+# usw1-az2, cac1-az3 — and the VPC's own AZ choice is NEVER held in shell
+# env (holding it here would be the exact "pinned value an operator can
+# forget to set on a later deploy" failure mode the abandoned
+# secret-header design kept reproducing). This checks the AZ IDs the
+# subnets the internal ALB will actually use resolve to, and refuses with
+# the fix (pin AZs in committed CDK context) rather than letting a VPC
+# origin fail to create — or, worse, create successfully in a supported AZ
+# while the NEW private-isolated subnets landed in a DIFFERENT, unsupported
+# one than an operator assumed.
+#
+# Skipped entirely for STRATOCLAVE_CLOUDFRONT_ORIGIN=public (no VPC origin
+# built at all in that mode) and under --dry-run (no AWS mutation is about
+# to happen, and `cdk synth`'s own account/region resolution is what this
+# check needs real credentials for anyway).
+check_vpc_origin_az_support() {
+  if [ "$CLOUDFRONT_ORIGIN" = "public" ]; then
+    return 0
+  fi
+  if [ "$DRY_RUN" = true ]; then
+    log_warn "AZ pre-flight for VPC origins skipped under --dry-run; the real invocation checks it."
+    return 0
+  fi
+  # The AZs the VPC actually picked. For an EXISTING deployment, read them
+  # off the live public subnets (the VPC's AZ choice does not change once
+  # the VPC exists — see lib/network-stack.ts's doc on why appending the
+  # PrivateIsolated group cannot move them). For a FRESH deployment there
+  # is no VPC yet to query; this check then runs again, for real, on the
+  # NEXT invocation after the VPC exists — a VPC origin create failure in
+  # an unsupported AZ on a first deploy is loud and CloudFormation rolls
+  # back cleanly, which is an acceptable (if less friendly) fallback for
+  # the one case this pre-flight cannot see ahead of time.
+  local vpc_id
+  vpc_id=$(aws ssm get-parameter --name "/${PREFIX}/network/vpc-id" \
+    --region "$REGION" --query 'Parameter.Value' --output text 2>/dev/null)
+  if [ -z "$vpc_id" ] || [ "$vpc_id" = "None" ]; then
+    log_info "No existing VPC found for prefix '$PREFIX' (first deploy) — AZ pre-flight will run again on the next invocation, once subnets exist."
+    return 0
+  fi
+  local az_names
+  az_names=$(aws ec2 describe-subnets --region "$REGION" \
+    --filters "Name=vpc-id,Values=$vpc_id" "Name=tag:aws-cdk:subnet-type,Values=Public" \
+    --query 'Subnets[].AvailabilityZone' --output text 2>/dev/null)
+  if [ -z "$az_names" ]; then
+    log_warn "Could not resolve this VPC's Availability Zones (describe-subnets returned none); skipping the VPC-origin AZ check. Verify manually: aws ec2 describe-availability-zones --region $REGION"
+    return 0
+  fi
+  local az_id az_zone_name unsupported_found=false
+  for az_zone_name in $az_names; do
+    az_id=$(aws ec2 describe-availability-zones --region "$REGION" \
+      --zone-names "$az_zone_name" --query 'AvailabilityZones[0].ZoneId' --output text 2>/dev/null)
+    if cfo_az_unsupported "$az_id"; then
+      log_error "This deployment's VPC uses $az_zone_name, Availability Zone ID $az_id — CloudFront VPC origins are unsupported there."
+      unsupported_found=true
+    fi
+  done
+  if [ "$unsupported_found" = true ]; then
+    log_error "STRATOCLAVE_CLOUDFRONT_ORIGIN=$CLOUDFRONT_ORIGIN needs a VPC whose Availability Zones are all VPC-origin-supported. This account's VPC for prefix '$PREFIX' is not. Fix: pin supported AZs in COMMITTED CDK context (cdk.json's 'availability-zones:account=<account>:region=<region>' key — never in shell env, which an operator can forget to set on a later deploy), then deploy a FRESH prefix (an existing VPC's AZs cannot be changed without replacing its subnets). STRATOCLAVE_CLOUDFRONT_ORIGIN=public remains the supported, documented fallback for an account whose VPC sits in an unsupported AZ and cannot be moved."
+    exit 1
+  fi
+  log_info "VPC-origin AZ pre-flight: all of this deployment's AZs support CloudFront VPC origins."
+}
+check_vpc_origin_az_support
+
 if [ ! -d "$IAC_DIR/node_modules" ]; then
   log_info "Installing CDK dependencies..."
   cd "$IAC_DIR" && npm install
@@ -308,7 +496,7 @@ cd "$IAC_DIR" && npx tsc --noEmit 2>&1 | tee -a "$DEPLOYMENT_LOG" || {
 
 if [ "$DRY_RUN" = true ]; then
   echo ""
-  echo "Plan (STRATOCLAVE_ENTRY=$ENTRY):"
+  echo "Plan (STRATOCLAVE_ENTRY=$ENTRY, STRATOCLAVE_CLOUDFRONT_ORIGIN=$CLOUDFRONT_ORIGIN):"
   echo "  1. $NETWORK_STACK"
   echo "  2. $DYNAMODB_STACK"
   echo "  3. $ECR_STACK"
@@ -319,6 +507,18 @@ if [ "$DRY_RUN" = true ]; then
     echo "  7. $ECS_STACK"
     echo "  8. $CONFIG_STACK"
     echo "  (no WAF stack, no Frontend stack: headless, no CloudFront, no S3 console)"
+  elif [ "$ENTRY" = "both" ]; then
+    if [ "$ENABLE_WAF_EFFECTIVE" != "false" ]; then
+      echo "  5. $WAF_STACK"
+    fi
+    echo "  6. $FRONTEND_STACK      (via a CloudFront VPC origin onto the internal ALB)"
+    echo "  7. $PRIVATE_LINK_STACK"
+    echo "  8. $COGNITO_STACK"
+    echo "  9. $ECS_STACK"
+    echo "  10. $CONFIG_STACK"
+    if [ "$SKIP_BUILD" = false ]; then
+      echo "  11. Build Frontend, upload to S3, invalidate CloudFront"
+    fi
   else
     if [ "$ENABLE_WAF_EFFECTIVE" != "false" ]; then
       echo "  5. $WAF_STACK"
@@ -407,7 +607,14 @@ CONFIGEOF
 fi
 
 # --- Summary ---
-ALB_DNS=$(get_stack_output "$ALB_STACK" "AlbDnsName" 2>/dev/null || echo "N/A")
+# "AlbDnsName" only exists when a public ALB was built (cloudfrontOrigin
+# public/vpc-expand/vpc-switch); "InternalAlbDnsName" only when an internal
+# one was (vpc-expand/vpc-switch/vpc, or any STRATOCLAVE_ENTRY=both deploy).
+# At least one always exists.
+ALB_DNS=$(get_stack_output "$ALB_STACK" "AlbDnsName" 2>/dev/null || echo "")
+if [ -z "$ALB_DNS" ]; then
+  ALB_DNS=$(get_stack_output "$ALB_STACK" "InternalAlbDnsName" 2>/dev/null || echo "N/A")
+fi
 COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID:-$(get_stack_output "$COGNITO_STACK" "UserPoolId" 2>/dev/null || echo "N/A")}
 
 echo ""
@@ -416,7 +623,33 @@ echo "[SUCCESS] Deployment completed"
 echo "============================================"
 echo ""
 
-if [ "$ENTRY" = "private" ]; then
+if [ "$ENTRY" = "both" ]; then
+  CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN:-$(get_stack_output "$FRONTEND_STACK" "CloudFrontDomainName")}
+  PRIVATE_URL=$(get_stack_output "$PRIVATE_LINK_STACK" "PrivateUrl" 2>/dev/null || echo "N/A")
+  ENDPOINT_SERVICE_NAME=$(get_stack_output "$PRIVATE_LINK_STACK" "EndpointServiceName" 2>/dev/null || echo "N/A")
+  echo "  Frontend URL (WAF-protected): https://$CLOUDFRONT_DOMAIN"
+  echo "  Private URL (no WAF):         $PRIVATE_URL"
+  echo "  Endpoint service:             $ENDPOINT_SERVICE_NAME"
+  echo "  ALB (internal, shared):       $ALB_DNS"
+  echo "  User Pool ID:                 $COGNITO_USER_POOL_ID"
+  echo ""
+  echo "Next steps (STRATOCLAVE_ENTRY=both):"
+  echo "  1. Push the Backend container image (also builds+pushes the scheduled-Lambda"
+  echo "     image and prints the LAMBDA_IMAGE_TAG the next step needs):"
+  echo "     cd $IAC_DIR && ./scripts/build-and-push.sh"
+  echo "  2. REQUIRED second pass — deploy the quota gated stacks:"
+  echo "     cd $IAC_DIR && LAMBDA_IMAGE_TAG=<tag from step 1> npx cdk deploy \\"
+  echo "       ${PREFIX}-quota-reconciler ${PREFIX}-quota-grants \\"
+  echo "       -c quotaReconciler=true -c quotaGrants=true --require-approval never"
+  echo "  3. Share the CloudFront URL with WAF-protected / general CLI users:"
+  echo "     stratoclave setup https://$CLOUDFRONT_DOMAIN"
+  echo "  4. Have each approved PrivateLink consumer create their interface endpoint,"
+  echo "     accept the resulting pending connection(s) from this (provider) account,"
+  echo "     then point STRATOCLAVE_PRIVATE_DOMAIN at the endpoint from inside the"
+  echo "     consumer VPC — same exchange as STRATOCLAVE_ENTRY=private. See"
+  echo "     docs/DEPLOYMENT.md, 'both', and 'Private entry (PrivateLink), headless'."
+  echo "     Only the PrivateLink path bypasses WAF; the CloudFront path above does not."
+elif [ "$ENTRY" = "private" ]; then
   PRIVATE_URL=$(get_stack_output "$PRIVATE_LINK_STACK" "PrivateUrl" 2>/dev/null || echo "N/A")
   ENDPOINT_SERVICE_NAME=$(get_stack_output "$PRIVATE_LINK_STACK" "EndpointServiceName" 2>/dev/null || echo "N/A")
   echo "  Private URL:       $PRIVATE_URL"
@@ -449,7 +682,11 @@ if [ "$ENTRY" = "private" ]; then
 else
   CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN:-$(get_stack_output "$FRONTEND_STACK" "CloudFrontDomainName")}
   echo "  Frontend URL:  https://$CLOUDFRONT_DOMAIN"
-  echo "  ALB endpoint:  http://$ALB_DNS"
+  if [ "$CLOUDFRONT_ORIGIN" = "public" ]; then
+    echo "  ALB endpoint:  http://$ALB_DNS   (public; reachable directly, not just through CloudFront — see docs/DEPLOYMENT.md's 'VPC origin' section for why STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc closes that)"
+  else
+    echo "  ALB (internal, no public address): $ALB_DNS   (reachable only through the CloudFront VPC origin above or from inside this VPC)"
+  fi
   echo "  User Pool ID:  $COGNITO_USER_POOL_ID"
   echo ""
   echo "Next steps:"

@@ -34,8 +34,36 @@ export interface NetworkStackProps extends cdk.StackProps {
    * calls. `lib/private-link-stack.ts` only consumes `nlbSecurityGroup`
    * (to attach it to the NLB construct itself); it does not create or
    * modify any security group.
+   *
+   * `'both'`: BOTH blocks below run — the CloudFront prefix-list ingress on
+   * :80 AND the NLB security group + its :443 ingress to `albSecurityGroup`
+   * — because one ALB (`lib/alb-stack.ts`'s internal ALB, the only one this
+   * mode ever builds) serves both CloudFront (via a VPC origin) and
+   * PrivateLink (via the NLB) at once.
    */
-  entryMode?: 'cloudfront' | 'private';
+  entryMode?: 'cloudfront' | 'private' | 'both';
+
+  /**
+   * `STRATOCLAVE_CLOUDFRONT_ORIGIN` (see `lib/entry-config.ts`). @default 'public'
+   *
+   * `'public'`: exactly today — one subnet group (`Public`). Any other value
+   * adds a second group, `PrivateIsolated` (`ec2.SubnetType.PRIVATE_ISOLATED`,
+   * `/24`, 2 AZs), for the internal ALB that `lib/alb-stack.ts` builds when a
+   * CloudFront VPC origin is in play. Appended AFTER `Public` in
+   * `subnetConfiguration` — CDK allocates CIDRs within the VPC's `/16` in
+   * array order, and `Public` already has an explicit `cidrMask` (not
+   * CDK-computed from a subnet count), so appending a group cannot move or
+   * resize the two subnets already carved out for it. Proven by synth diff,
+   * not merely asserted: see `test/network-stack-vpc-origin.test.ts`'s pinned
+   * CIDR/logical-id case, which fails the moment that assumption stops
+   * holding (e.g. if `Public` ever loses its explicit `cidrMask`).
+   *
+   * Refused in combination with `entryMode === 'private'` one layer up, in
+   * `lib/entry-config.ts::resolveCloudfrontOriginConfig` — this stack never
+   * receives both at once, but see the constructor for a same-stack assertion
+   * of that invariant anyway (defence in depth, not the primary guard).
+   */
+  cloudfrontOrigin?: 'public' | 'vpc-expand' | 'vpc-switch' | 'vpc';
 }
 
 /**
@@ -49,11 +77,34 @@ export class NetworkStack extends cdk.Stack {
   public readonly vpc: ec2.Vpc;
   public readonly albSecurityGroup: ec2.SecurityGroup;
   public readonly ecsSecurityGroup: ec2.SecurityGroup;
-  /** Only created when `entryMode === 'private'`. */
+  /** Only created when `entryMode === 'private'` or `'both'`. */
   public readonly nlbSecurityGroup?: ec2.SecurityGroup;
 
   constructor(scope: Construct, id: string, props: NetworkStackProps) {
     super(scope, id, props);
+
+    const entryMode = props.entryMode ?? 'cloudfront';
+    const cloudfrontOrigin = props.cloudfrontOrigin ?? 'public';
+    if (cloudfrontOrigin !== 'public' && entryMode === 'private') {
+      // Primary guard is `resolveCloudfrontOriginConfig` in lib/entry-config.ts,
+      // which runs before any stack is constructed. This throw only fires if a
+      // future caller constructs NetworkStack directly with both set, bypassing
+      // that guard — the same "fail loudly here too" posture as the
+      // `albStack.httpsListener`/`networkStack.nlbSecurityGroup` assertions in
+      // bin/iac.ts.
+      throw new Error(
+        `NetworkStack: cloudfrontOrigin ("${cloudfrontOrigin}") has no effect when ` +
+          'entryMode is "private" — there is no CloudFront distribution on that path ' +
+          'for a VPC origin to belong to. This should have been refused already by ' +
+          'lib/entry-config.ts::resolveCloudfrontOriginConfig.',
+      );
+    }
+    // Any `cloudfrontOrigin` other than 'public' needs the internal ALB's
+    // isolated subnets (lib/alb-stack.ts). All three non-public values need
+    // them (vpc-expand/vpc-switch build the internal ALB alongside the public
+    // one; vpc builds only the internal one) — see entry-config.ts's doc for
+    // why there is no fourth, "no isolated subnets but still vpc" state.
+    const needsIsolatedSubnets = cloudfrontOrigin !== 'public';
 
     this.vpc = new ec2.Vpc(this, 'Vpc', {
       vpcName: `${props.prefix}-vpc`,
@@ -66,6 +117,20 @@ export class NetworkStack extends cdk.Stack {
           subnetType: ec2.SubnetType.PUBLIC,
           cidrMask: 24,
         },
+        // Appended, not prepended: see this prop's doc on why that keeps the
+        // two `Public` subnets' CIDRs and logical ids unchanged for every
+        // deployment that was on `cloudfrontOrigin: 'public'` before this
+        // existed. Only materialised when actually needed, so a `public`
+        // deployment's VPC template is byte-identical to before this feature.
+        ...(needsIsolatedSubnets
+          ? [
+              {
+                name: 'PrivateIsolated',
+                subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+                cidrMask: 24,
+              },
+            ]
+          : []),
       ],
       enableDnsHostnames: true,
       enableDnsSupport: true,
@@ -103,9 +168,10 @@ export class NetworkStack extends cdk.Stack {
     // deployment that never uses it. `albSecurityGroup` is created above
     // either way; the private-mode branch below is what adds its one
     // ingress rule for that mode instead (from the internal NLB's security
-    // group, on :443).
-    const entryMode = props.entryMode ?? 'cloudfront';
-    if (entryMode === 'cloudfront') {
+    // group, on :443). `entryMode` is resolved once, above, before the VPC
+    // is even constructed — see this prop's doc for the `'both'` case,
+    // where BOTH this block and the one below it run.
+    if (entryMode === 'cloudfront' || entryMode === 'both') {
       const cloudFrontPrefixListLookup = new cr.AwsCustomResource(
         this,
         'CloudFrontOriginFacingPrefixListLookup',
@@ -146,7 +212,8 @@ export class NetworkStack extends cdk.Stack {
         ec2.Port.tcp(80),
         'Allow HTTP from CloudFront edge locations only',
       );
-    } else {
+    }
+    if (entryMode === 'private' || entryMode === 'both') {
       // The internal NLB's security group, created here (not in
       // lib/private-link-stack.ts) so that both of the rules it needs can
       // be ordinary same-stack L2 calls: `addIngressRule` and

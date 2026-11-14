@@ -118,4 +118,36 @@ describe('cdk synth (real bin/iac.ts) — every context-gated stack, cdk-nag mus
     },
     120_000,
   );
+
+  test(
+    'STRATOCLAVE_ENTRY=both: synth succeeds with zero AwsSolutions errors (the ELB2 blanket suppression is stripped for its real access logs, same as private)',
+    () => {
+      const result = synth([], {
+        STRATOCLAVE_ENTRY: 'both',
+        STRATOCLAVE_PRIVATE_CERTIFICATE_ARN:
+          'arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555',
+        STRATOCLAVE_PRIVATE_DOMAIN: 'stratoclave.internal.example.com',
+        STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: 'arn:aws:iam::123456789012:root',
+      });
+      const errorLines = result.output
+        .split('\n')
+        .filter((line) => line.includes('[Error at') && line.includes('AwsSolutions-'));
+      expect(errorLines).toEqual([]);
+      expect(result.failed).toBe(false);
+    },
+    120_000,
+  );
+
+  test(
+    'STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-expand: synth succeeds with zero AwsSolutions errors (two ALBs at once)',
+    () => {
+      const result = synth([], { STRATOCLAVE_CLOUDFRONT_ORIGIN: 'vpc-expand' });
+      const errorLines = result.output
+        .split('\n')
+        .filter((line) => line.includes('[Error at') && line.includes('AwsSolutions-'));
+      expect(errorLines).toEqual([]);
+      expect(result.failed).toBe(false);
+    },
+    120_000,
+  );
 });
