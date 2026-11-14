@@ -184,6 +184,19 @@ enum Commands {
         /// `stratoclave codex` subcommand uses its own ephemeral config.
         #[arg(long)]
         codex: bool,
+
+        /// Allow an api_endpoint host ending in .internal / .local /
+        /// .localdomain. `STRATOCLAVE_ENTRY=private` (see
+        /// docs/DEPLOYMENT.md, "Private entry (PrivateLink), headless")
+        /// is reached only from inside an already-accepted consumer VPC,
+        /// so the SSRF concern the suffix denylist exists for (a rogue
+        /// DNS record tricking an unattended bootstrap into an
+        /// internal-only service) does not apply to a URL the operator
+        /// is typing themselves, on purpose, on this path. Every OTHER
+        /// SSRF check (metadata hosts, literal private/link-local IPs,
+        /// userinfo, HTTPS-only) still applies with this flag set.
+        #[arg(long)]
+        allow_internal_host: bool,
     },
 }
 
@@ -818,7 +831,10 @@ async fn main() -> ExitCode {
             force,
             dry_run,
             codex,
-        }) => wrap(commands::setup::run(api_endpoint, force, dry_run, codex).await),
+            allow_internal_host,
+        }) => wrap(
+            commands::setup::run(api_endpoint, force, dry_run, codex, allow_internal_host).await,
+        ),
         None => {
             eprintln!("Usage: stratoclave <command> --help");
             ExitCode::from(1)

@@ -2512,6 +2512,12 @@
    "id": "cl-62217c3ecd04",
    "claim": "Each route's OWN two limits (see [Rate limits on sign-in routes](#rate-limits-on-sign-in-routes)): a per-address flood guard at this number, and an identity-plus-address bucket at the SAME number keyed on the email (`/login`, `/respond`) or the verified account (`/sso-exchange`, only after STS has confirmed it). `/ui-ticket/consume` also uses `SSO_EXCHANGE_RATE_LIMIT` for its own (address-only) flood guard. Sourced from CDK context, not `process.env`, for the same redeploy-persistence reason as the audience settings above — edit `iac/cdk.json`'s \"context\" object directly.",
    "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-c4c2332d80a2",
+   "claim": "- **On the private entry, clients do not have their own addresses.** The gateway sees each request as coming from the internal load balancer node that forwarded it, so all clients share one address per load balancer node: two by default, one per Availability Zone (measured: wrong-password attempts from one client alternated between two node addresses and the first `429` came at attempt 16, not 11).",
+   "anchor": "contract:C6.13@4d26afd0",
+   "note": "measured on a private-entry deployment: two load balancer node addresses, first 429 at attempt 16"
   }
  ]
 }
