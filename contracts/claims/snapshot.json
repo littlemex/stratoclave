@@ -1269,6 +1269,39 @@
   },
   "cl-df2735c52ec6": {
    "first_seen": "docs/design/request-bodies.md, the marker value rule: minted ids and task tags pass (C13.6)"
+  },
+  "cl-811331e0e358": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.4)"
+  },
+  "cl-430c3f5c2116": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.5)"
+  },
+  "cl-b54e67ab8944": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.5)"
+  },
+  "cl-9b29a455208a": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.5)"
+  },
+  "cl-008cab2376af": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.5)"
+  },
+  "cl-c9faf4422a9c": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.5)"
+  },
+  "cl-c1b83bb19606": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.5)"
+  },
+  "cl-28604aa86852": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.5)"
+  },
+  "cl-a667400b2f29": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.5)"
+  },
+  "cl-38e09da86b54": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.5)"
+  },
+  "cl-1438a79e7fe1": {
+   "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.5)"
   }
  },
  "retired": {
@@ -1533,6 +1566,7 @@
     "C11.2": "E",
     "C11.3": "E",
     "C11.4": "B",
+    "C11.5": "E",
     "C12.1": "E",
     "C12.2": "E",
     "C12.3": "E",

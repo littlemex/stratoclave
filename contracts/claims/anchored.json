@@ -2217,6 +2217,61 @@
    "id": "cl-df2735c52ec6",
    "claim": "The ids the gateway mints or receives from Cognito (`tenant-<uuid>`, a Cognito `sub`, a hold id) and every task tag its grammar accepts pass.",
    "anchor": "contract:C13.6@624bfde6"
+  },
+  {
+   "id": "cl-811331e0e358",
+   "claim": "`STRATOCLAVE_RESIDENCY` (above) only ever warns, or hard-fails `cdk synth`, on a leak the app itself would reach — it is a synth-time check, not an AWS-enforced boundary.",
+   "anchor": "contract:C11.4@d9fa3030"
+  },
+  {
+   "id": "cl-430c3f5c2116",
+   "claim": "`STRATOCLAVE_INFERENCE_REGIONS` is a different, stronger mechanism: a comma-separated allowlist of AWS regions Bedrock inference may run in, enforced by AWS IAM itself, not merely checked at synth.",
+   "anchor": "contract:C11.5@0355edf1"
+  },
+  {
+   "id": "cl-b54e67ab8944",
+   "claim": "The two mechanisms address the same concern and cannot both be set — pick one.",
+   "anchor": "contract:C11.5@0355edf1"
+  },
+  {
+   "id": "cl-9b29a455208a",
+   "claim": "`DEFAULT_BEDROCK_MODEL` must be set explicitly under a boundary — the built-in default (a `us.` profile) is refused whenever it is not reachable from `BEDROCK_PRIMARY_REGION` — and a `global.` profile is always refused under a boundary, because it is exactly the ARN shape the boundary's `Deny` statement (below) blocks.",
+   "anchor": "contract:C11.5@0355edf1"
+  },
+  {
+   "id": "cl-008cab2376af",
+   "claim": "For a geo-prefixed id (`us.` / `eu.` / `apac.` / `jp.` / `au.` / `ca.`), the IaC check only rules out a prefix whose geography cannot possibly include `BEDROCK_PRIMARY_REGION` (for example `us.` with a Japan primary); passing that check is not a guarantee the model is actually available there — verify with `aws bedrock list-foundation-models --region <primary>` as above.",
+   "anchor": "contract:C11.5@0355edf1"
+  },
+  {
+   "id": "cl-c9faf4422a9c",
+   "claim": "A directly-hosted (non-geo-prefixed) model id carries no such claim and is always accepted.",
+   "anchor": "contract:C11.5@0355edf1"
+  },
+  {
+   "id": "cl-c1b83bb19606",
+   "claim": "The ECS task role's Bedrock permissions are generated from `STRATOCLAVE_INFERENCE_REGIONS`: every `foundation-model` / `inference-profile` resource is scoped to one ARN per region in the boundary (instead of a wildcard region), and an explicit `Deny` is added on the region-less foundation-model ARN.",
+   "anchor": "contract:C11.5@0355edf1"
+  },
+  {
+   "id": "cl-28604aa86852",
+   "claim": "So a boundary is enforced twice, independently: even a backend defect that served a model outside the boundary would still have its Bedrock call refused by AWS.",
+   "anchor": "contract:C11.5@0355edf1"
+  },
+  {
+   "id": "cl-a667400b2f29",
+   "claim": "`BEDROCK_PRIMARY_REGION` must be one of those two for the bundled list to be served at all; the IAM boundary itself grants a foundation-model ARN for these ids in every region in `STRATOCLAVE_INFERENCE_REGIONS` regardless, so an unused grant in a region these models are not actually recorded for is harmless, not a security gap.",
+   "anchor": "contract:C11.5@0355edf1"
+  },
+  {
+   "id": "cl-38e09da86b54",
+   "claim": "- **The boundary covers Bedrock inference only.** It says nothing about where the gateway's own compute, logs, or CloudFront distribution run — those follow `STRATOCLAVE_REGION` / the WAF's fixed `us-east-1`, as always.",
+   "anchor": "contract:C11.5@0355edf1"
+  },
+  {
+   "id": "cl-1438a79e7fe1",
+   "claim": "- **The effective boundary is always named** in a `cdk synth` / `cdk diff` informational annotation (\"none\" when unset), so redeploying from a shell that forgot to export `STRATOCLAVE_INFERENCE_REGIONS` is visible as the boundary silently widening back to \"none\", rather than invisible.",
+   "anchor": "contract:C11.5@0355edf1"
   }
  ]
 }
