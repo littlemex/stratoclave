@@ -625,6 +625,9 @@
   "cl-8a910fed394c": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-8a948ec83446": {
+   "first_seen": "docs/ADMIN_GUIDE.md, added with the request-bodies statement (C12.7, issue #237)"
+  },
   "cl-8c79b9056787": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -1426,7 +1429,8 @@
     "docs/design/hard-ceiling.md",
     "docs/design/limits.md",
     "docs/design/price-feeds.md",
-    "docs/design/quota-raises.md"
+    "docs/design/quota-raises.md",
+    "docs/design/request-bodies.md"
    ],
    "protected_subjects": [
     "\\bcredentials?\\b",
@@ -1564,6 +1568,7 @@
     "C8.6": "N",
     "C8.7": "N",
     "C12.6": "E",
+    "C12.7": "B",
     "C13.4": "E",
     "C13.5": "E",
     "C14.33": "B",

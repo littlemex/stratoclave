@@ -389,6 +389,12 @@ The web UI tenant detail page renders the same data as two bar charts (by model,
 
 Each user detail page in the web UI shows `credit_remaining`, `credit_used`, and a sparkline of the last 30 days of activity. The user list surfaces the same columns for at-a-glance review.
 
+### Where prompts and responses go
+
+The usage records above hold counts, ids and costs, not prompt or completion text (C12.7). [request-bodies.md](design/request-bodies.md) lists every table the deployment creates and what each holds, says which part is checked, and says where a body can be found instead.
+
+If your organisation needs prompt history, turn on Amazon Bedrock model invocation logging with text delivery. That is a setting of the AWS account and region, not of this gateway: it records the bodies of each tenant served from that account and region at once, and it has to be set in each region the gateway calls. What those records say about which tenant and which user sent a request is in the same document.
+
 ---
 
 ## Handing the web URL to CLI users
