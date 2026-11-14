@@ -114,7 +114,7 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
   // output of every state this feature can reach — forward AND the
   // documented rollback direction — never hits it.
   describe('cross-stack export/import safety across every migration step, forward and rollback', () => {
-    const FORWARD: Array<[string, () => { raw: Record<string, Record<string, any>> }]> = [
+    const FORWARD: Array<[string, () => { raw: Record<string, Record<string, any>>; allStacks: StackSet }]> = [
       ['public', () => publicOut],
       ['vpc-expand', () => expandOut],
       ['vpc-switch', () => switchOut],

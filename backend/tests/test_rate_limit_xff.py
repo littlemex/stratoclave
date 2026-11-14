@@ -36,12 +36,16 @@ import pytest
 from fastapi import Request
 
 from types import SimpleNamespace
+
+from starlette.datastructures import Headers
 from typing import Mapping
 
 
 def _request(headers: Mapping[str, str], client_host: str = "10.0.0.1"):
+    # The real request's header type, so getlist() and case-insensitive
+    # lookups behave as they do in production.
     return SimpleNamespace(
-        headers={k.lower(): v for k, v in headers.items()},
+        headers=Headers(headers=dict(headers)),
         client=SimpleNamespace(host=client_host),
     )
 
@@ -194,6 +198,20 @@ class TestBothModeSharedAlb:
         # the whole XFF header is distrusted on this leg and the ALB's own
         # observed peer is used instead.
         assert key == "10.0.3.9"
+
+    def test_a_repeated_forwarded_port_is_distrusted_even_if_it_names_the_cloudfront_port(
+        self, monkeypatch
+    ):
+        rl = self._reload_with_both_mode_port(monkeypatch)
+        request = SimpleNamespace(
+            headers=Headers(raw=[
+                (b"x-forwarded-for", b"8.8.8.8, 198.51.100.5"),
+                (b"x-forwarded-port", b"80"),
+                (b"x-forwarded-port", b"80"),
+            ]),
+            client=SimpleNamespace(host="10.0.3.9"),
+        )
+        assert rl._client_key(request) == "10.0.3.9"
 
     def test_cloudfront_leg_on_the_shared_alb_is_unaffected(self, monkeypatch):
         """Port 80 (or no X-Forwarded-Port at all, e.g. every other entry
