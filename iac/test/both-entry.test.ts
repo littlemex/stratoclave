@@ -286,18 +286,14 @@ describe('STRATOCLAVE_ENTRY=both — synthesized templates', () => {
         expect(env.STRATOCLAVE_API_ENDPOINT_PRIVATE).toBe(`https://${DOMAIN}`);
       });
 
-      test('STRATOCLAVE_STS_AUDIENCES lists both hosts (forward-wiring; not consumed yet)', () => {
-        // This one IS a plain joined string: Array.join(',') over one
-        // literal (the private URL) and one CDK Token string placeholder
-        // (the CloudFront URL) — the token resolves at template-render
-        // time, so the raw JSON already contains the final Fn::Join form
-        // for that half and a literal for the other, concatenated. Assert
-        // on the two pieces we know for certain rather than the exact
-        // intrinsic shape of the join (which is the join IMPLEMENTATION,
-        // not the property under test).
+      test('STRATOCLAVE_STS_AUDIENCES adds the PrivateLink host; the CloudFront host comes from STRATOCLAVE_API_ENDPOINT', () => {
+        // backend/mvp/sso_sts.expected_audiences() always includes the host of
+        // STRATOCLAVE_API_ENDPOINT (the CloudFront URL here), so the extra list
+        // carries only the second entry's host.
         const rendered = JSON.stringify(env.STRATOCLAVE_STS_AUDIENCES);
         expect(rendered).toContain(`https://${DOMAIN}`);
-        expect(rendered).toContain('frontend');
+        expect(rendered).not.toContain('frontend');
+        expect(JSON.stringify(env.STRATOCLAVE_API_ENDPOINT)).toContain('frontend');
       });
     });
 
