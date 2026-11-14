@@ -183,12 +183,14 @@ def _request_key(request: Request) -> str:
 
     Never a header value the caller presents: an unverified header would let a
     caller pick a fresh bucket per request by sending a made-up key. The user id
-    is set on `request.state` by the limiter's wrapper from the route's resolved
-    `AuthenticatedUser` (`core.rate_limit_ddb`), so it exists only after
-    authentication has succeeded. Keyed on the user because an address is a poor
+    is set on `request.state` by the authentication dependency
+    (`mvp.deps.get_current_user`), which FastAPI resolves before the limited
+    route runs, so it exists only after authentication has succeeded. Keyed on the user because an address is a poor
     identity for an authenticated caller: users behind one NAT share it, and on
     the private (PrivateLink) entry every request arrives from the load balancer.
-    Unauthenticated routes (sign-in) still key on the address."""
+    Unauthenticated routes (sign-in) still key on the address, so on the private
+    entry their limit is shared by every caller (docs/DEPLOYMENT.md); a request
+    that fails authentication never reaches the limiter."""
     principal = getattr(getattr(request, "state", None), "rate_principal", None)
     if principal:
         return f"user:{principal}"

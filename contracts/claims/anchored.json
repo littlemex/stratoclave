@@ -2267,6 +2267,26 @@
    "id": "cl-395db96c78d6",
    "claim": "An id the file does not contain is accepted with a warning, because it may be a model activated from the console; the gateway checks it again at startup and refuses to start if it cannot be served.",
    "anchor": "contract:C11.6@7c8805e1"
+  },
+  {
+   "id": "cl-f712992c01ff",
+   "claim": "Make sure `STRATOCLAVE_API_ENDPOINT` (and `STRATOCLAVE_STS_AUDIENCES` if the gateway is reached under more than one name) lists every URL users set the CLI up against.",
+   "anchor": "contract:C6.9@49beca3b"
+  },
+  {
+   "id": "cl-eb902815f266",
+   "claim": "Sign-in routes are rate-limited by client address; behind a NAT, and on the private entry where every request arrives from the load balancer, that limit is shared by everyone, so one noisy client can slow sign-in for all.",
+   "anchor": "contract:C6.10@f27338bb"
+  },
+  {
+   "id": "cl-1f26ac9a4ce4",
+   "claim": "Published in `/.well-known/stratoclave-config`. Outside a local environment (`ENVIRONMENT` `development`, `local` or `test`) the gateway refuses to start without it, and the document is never built from request headers. Its host is also what a signed AWS sign-in must name (see [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)).",
+   "anchor": "contract:C6.9@49beca3b"
+  },
+  {
+   "id": "cl-cc963e964b60",
+   "claim": "Comma-separated extra URLs this gateway is reached under, whose hosts a signed AWS sign-in may also name. Every entry must be an absolute http(s) URL, or the gateway refuses to start.",
+   "anchor": "contract:C6.9@49beca3b"
   }
  ]
 }

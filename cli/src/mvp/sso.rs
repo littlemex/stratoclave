@@ -54,10 +54,11 @@ struct SsoExchangeResponse {
     new_user: bool,
 }
 
-/// The host of the gateway URL this CLI was set up against: the audience the
-/// signed GetCallerIdentity is bound to. Known to the CLI on its own (from
-/// `stratoclave setup <url>`), never taken from the gateway, so a look-alike
-/// endpoint cannot have a request signed for the real one.
+/// The host of the gateway URL this CLI sends the exchange to: the audience the
+/// signed GetCallerIdentity is bound to. The invariant that matters is that the
+/// audience and the URL the request is POSTed to are the same value
+/// (`config.api_endpoint`), so a request signed for one gateway can only be
+/// used at that gateway.
 fn audience_host(api_endpoint: &str) -> Result<String> {
     let url = reqwest::Url::parse(api_endpoint)
         .with_context(|| format!("api_endpoint is not a URL: {api_endpoint}"))?;
@@ -125,11 +126,11 @@ pub async fn login(opts: SsoLoginOptions) -> Result<()> {
         "application/x-www-form-urlencoded".to_string(),
     );
     headers_map.insert("Host".to_string(), sts_host.clone());
-    // Bind the signed request to this gateway's host: the header is signed, so STS
-    // refuses any change to it, and the gateway refuses a request naming a host
-    // that is not its own. Without it, a GetCallerIdentity signed here could be
-    // replayed against another service that verifies identity the same way, and
-    // the reverse.
+    // Bind the signed request to the host it is sent to: the header is signed, so
+    // STS refuses any change to it, and a gateway that requires the binding
+    // refuses a request naming a host that is not its own, which stops a
+    // GetCallerIdentity signed for another service (or another gateway) from
+    // being replayed there.
     headers_map.insert(
         "X-Stratoclave-Audience".to_string(),
         audience_host(&config.api_endpoint)?,

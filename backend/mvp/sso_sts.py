@@ -89,7 +89,8 @@ def verify_and_call_sts(
     pattern therefore stays safe without migrating to the boto3 STS
     client (which would force us to re-sign and lose the pass-through).
     """
-    bound = _validate_inputs(method, url, headers, body)
+    _validate_inputs(method, url, headers, body)
+    audience_bound = _check_audience(headers)
 
     # Replay guard (P3-1, sweep-4 C-Critical-B2 fail-closed restored).
     #
@@ -166,17 +167,17 @@ def verify_and_call_sts(
     # Parse the XML response.
     try:
         identity = _parse_sts_response(resp.text)
-        if not bound:
-            # After STS has verified the caller, so the log names who still runs
-            # a CLI that does not bind its requests, and junk cannot spam it.
-            _log.warning("sso_sts_unbound_request_accepted", extra={"arn": identity.arn})
-        return identity
     except (ET.ParseError, KeyError) as e:
         _log.error("sts_response_parse_failed", extra={"error": str(e)})
         raise HTTPException(status_code=502, detail="Malformed STS response")
+    # After STS has verified the caller, so junk cannot inflate it: the share of
+    # unbound exchanges is how an operator knows every CLI is upgraded before
+    # turning STRATOCLAVE_STS_AUDIENCE_REQUIRED on (docs/DEPLOYMENT.md).
+    _log.info("sso_sts_exchange_verified", extra={"arn": identity.arn, "audience_bound": audience_bound})
+    return identity
 
 
-def _validate_inputs(method: str, url: str, headers: dict[str, str], body: str = "") -> bool:
+def _validate_inputs(method: str, url: str, headers: dict[str, str], body: str = "") -> None:
     if method.upper() != "POST":
         raise HTTPException(status_code=400, detail="STS request must use POST")
 
@@ -234,7 +235,6 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str], body: str =
             status_code=400, detail="Authorization header (sigv4) is required"
         )
 
-    return _check_audience(lowered)
 
 
 #: The header that binds a signed GetCallerIdentity to THIS gateway: the host of
@@ -250,31 +250,37 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str], body: str =
 #: being replayed here inside the 5 minute window. Until it is on, a request
 #: without the header is still accepted, so CLIs that predate it keep working.
 AUDIENCE_HEADER = "x-stratoclave-audience"
-_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$")
 
 
 def expected_audiences() -> frozenset[str]:
-    """This gateway's own hosts: those of `STRATOCLAVE_API_ENDPOINT` (a
-    comma-separated list when a deployment has more than one entry URL)."""
-    raw = os.getenv("STRATOCLAVE_API_ENDPOINT", "")
-    hosts = set()
-    for url in raw.split(","):
-        host = (urlparse(url.strip()).netloc or "").strip().lower()
-        if host:
-            hosts.add(host)
-    return frozenset(hosts)
+    """This gateway's own hosts: the host of `STRATOCLAVE_API_ENDPOINT`, plus any
+    hosts in `STRATOCLAVE_STS_AUDIENCES` (comma-separated URLs, for a deployment
+    reached under more than one name), normalised as `core.deployment.host_of`."""
+    from core.deployment import api_endpoint, host_of
+
+    urls = [api_endpoint() or ""] + os.getenv("STRATOCLAVE_STS_AUDIENCES", "").split(",")
+    return frozenset(h for h in (host_of(u) for u in urls if u.strip()) if h)
 
 
 def audience_required() -> bool:
-    return os.getenv("STRATOCLAVE_STS_AUDIENCE_REQUIRED", "").strip().lower() in {"1", "true", "yes", "on"}
+    from core.deployment import flag
+
+    return flag("STRATOCLAVE_STS_AUDIENCE_REQUIRED")
 
 
 def validate_audience_config() -> None:
-    """Startup check: with the requirement on and no API URL configured, every
-    sign-in would be refused; refuse to start instead."""
+    """Startup check: every `STRATOCLAVE_STS_AUDIENCES` entry must name a host, and
+    with the requirement on, the gateway must have at least one host to compare
+    with, or every sign-in would be refused."""
+    from core.deployment import host_of
+
+    bad = [u for u in os.getenv("STRATOCLAVE_STS_AUDIENCES", "").split(",")
+           if u.strip() and host_of(u) is None]
+    if bad:
+        raise RuntimeError(f"STRATOCLAVE_STS_AUDIENCES has entries that are not http(s) URLs: {bad}")
     if audience_required() and not expected_audiences():
-        raise RuntimeError("STRATOCLAVE_STS_AUDIENCE_REQUIRED is on but STRATOCLAVE_API_ENDPOINT "
-                           "is not set, so no signed request could name this gateway")
+        raise RuntimeError("STRATOCLAVE_STS_AUDIENCE_REQUIRED is on but no API URL is configured, "
+                           "so no signed request could name this gateway")
 
 
 def _sigv4_parameters(authorization: str) -> dict[str, str]:
@@ -283,20 +289,24 @@ def _sigv4_parameters(authorization: str) -> dict[str, str]:
     the gateway reads the same SignedHeaders STS verifies."""
     scheme, _, rest = authorization.strip().partition(" ")
     if scheme != "AWS4-HMAC-SHA256":
-        raise HTTPException(status_code=401, detail="unsupported signature scheme")
+        raise HTTPException(status_code=400, detail="malformed SigV4 Authorization header: scheme")
     params: dict[str, str] = {}
     for part in rest.split(","):
         key, sep, value = part.strip().partition("=")
         if not sep or key in params or key not in {"Credential", "SignedHeaders", "Signature"}:
-            raise HTTPException(status_code=401, detail="malformed SigV4 Authorization header")
+            raise HTTPException(status_code=400, detail="malformed SigV4 Authorization header")
         params[key] = value
     if set(params) != {"Credential", "SignedHeaders", "Signature"}:
-        raise HTTPException(status_code=401, detail="malformed SigV4 Authorization header")
+        raise HTTPException(status_code=400, detail="malformed SigV4 Authorization header")
     return params
 
 
-def _check_audience(lowered: dict[str, str]) -> bool:
-    """Refuse a signed request bound to another host; return whether it was bound."""
+def _check_audience(headers: dict[str, str]) -> bool:
+    """Refuse a signed request bound to a host that is not this gateway's; return
+    whether the request was bound at all."""
+    lowered = {k.lower(): v for k, v in headers.items()}
+    if len(lowered) != len(headers):
+        raise HTTPException(status_code=400, detail="header names repeat with different case")
     signed = set(_sigv4_parameters(lowered.get("authorization", ""))["SignedHeaders"].lower().split(";"))
     present = AUDIENCE_HEADER in lowered
     if AUDIENCE_HEADER in signed and not present:
@@ -308,13 +318,10 @@ def _check_audience(lowered: dict[str, str]) -> bool:
         return False
     if AUDIENCE_HEADER not in signed:
         raise HTTPException(status_code=401, detail=f"{AUDIENCE_HEADER} must be a signed header")
-    value = lowered[AUDIENCE_HEADER].strip().lower()
-    if not _HOST_RE.fullmatch(value):
-        raise HTTPException(status_code=401, detail=f"{AUDIENCE_HEADER} is not a host name")
     expected = expected_audiences()
     if not expected:
         raise HTTPException(status_code=401, detail="this gateway has no API URL configured to compare with")
-    if value not in expected:
+    if lowered[AUDIENCE_HEADER].strip().lower() not in expected:
         raise HTTPException(status_code=401, detail=f"the signed request names another host in {AUDIENCE_HEADER}")
     return True
 

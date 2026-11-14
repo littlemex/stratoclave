@@ -131,10 +131,10 @@ def _derive_api_endpoint(request: Request) -> str:
     # test environment: a caller could name any host in X-Forwarded-Host and
     # hand that URL to a CLI, which would then send its credentials there. A
     # deployment always sets STRATOCLAVE_API_ENDPOINT; anything else refuses.
-    trusted = (os.getenv("ENVIRONMENT", "").strip().lower() in {"development", "local", "test"}
-               or os.getenv("STRATOCLAVE_TRUST_FORWARDED_HOST", "").strip() == "1")
-    if not trusted:
-        raise HTTPException(status_code=500, detail="STRATOCLAVE_API_ENDPOINT is not set")
+    from core.deployment import is_local_environment
+
+    if not is_local_environment():
+        raise HTTPException(status_code=503, detail="STRATOCLAVE_API_ENDPOINT is not set")
 
     # 2. Inspect X-Forwarded-* headers.
     headers = request.headers

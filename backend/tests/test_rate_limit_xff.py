@@ -32,6 +32,9 @@ Production topology we test
 """
 from __future__ import annotations
 
+import pytest
+from fastapi import Request
+
 from types import SimpleNamespace
 from typing import Mapping
 
@@ -195,36 +198,46 @@ class TestRequestKey:
         assert key == "10.0.0.9"
 
 
-def test_the_limiter_wrapper_records_the_verified_user_for_the_bucket():
-    """Through the real decorator: the route's resolved AuthenticatedUser decides
-    the key, not a header."""
-    from core import rate_limit_ddb
+@pytest.mark.parametrize("is_async", [False, True])
+def test_a_limited_route_is_bucketed_by_the_user_the_auth_dependency_verified(monkeypatch, is_async):
+    """Through FastAPI, the real limiter decorator and the real get_current_user
+    (with only the token check faked): the bucket is the verified user, for sync
+    and async routes alike, and a made-up key on an unauthenticated route still
+    lands on the address."""
+    import asyncio
+
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+
+    import core.rate_limit as rl_mod
+    import core.rate_limit_ddb as ddb
+    from mvp import deps
 
     seen = []
+    monkeypatch.setattr(ddb, "_check", lambda scope, key, limit, window: seen.append(key))
+    monkeypatch.setattr(deps, "_resolve_current_user",
+                        lambda authorization, x_api_key: SimpleNamespace(user_id="u-42"))
+    lim = ddb.DynamoRateLimiter(client_key_func=rl_mod._request_key)
+    app = FastAPI()
 
-    class AuthenticatedUser:
-        user_id = "u-42"
-
-    lim = rate_limit_ddb.DynamoRateLimiter(client_key_func=lambda r: (seen.append(
-        getattr(r.state, "rate_principal", None)), "k")[1])
-    import core.rate_limit_ddb as mod
-    orig = mod._check
-    mod._check = lambda *a, **k: None
-    try:
-        from fastapi import Request
-
+    if is_async:
+        @app.post("/limited")
         @lim.limit("5/minute")
-        def route(request: Request, user: AuthenticatedUser):
-            return "ok"
+        async def limited(request: Request, user=Depends(deps.get_current_user)):
+            return {"ok": True}
+    else:
+        @app.post("/limited")
+        @lim.limit("5/minute")
+        def limited(request: Request, user=Depends(deps.get_current_user)):
+            return {"ok": True}
 
-        assert route(request=_fake_request(), user=AuthenticatedUser()) == "ok"
-    finally:
-        mod._check = orig
-    assert seen == ["u-42"]
+    @app.post("/open")
+    @lim.limit("5/minute")
+    def open_route(request: Request):
+        return {"ok": True}
 
-
-def _fake_request():
-    from starlette.requests import Request
-
-    return Request({"type": "http", "headers": [], "client": ("10.0.0.1", 1), "method": "POST",
-                    "path": "/", "query_string": b"", "state": {}})
+    client = TestClient(app)
+    assert client.post("/limited", headers={"x-api-key": "anything"}).status_code == 200
+    assert client.post("/open", headers={"x-api-key": "made-up"}).status_code == 200
+    assert seen[0] == "user:u-42"
+    assert not seen[1].startswith(("user:", "cred:"))

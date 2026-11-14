@@ -1299,6 +1299,18 @@
   },
   "cl-395db96c78d6": {
    "first_seen": "docs/DEPLOYMENT.md, the inference boundary section (C11.6)"
+  },
+  "cl-f712992c01ff": {
+   "first_seen": "docs/DEPLOYMENT.md, binding AWS sign-in (C6.9)"
+  },
+  "cl-eb902815f266": {
+   "first_seen": "docs/DEPLOYMENT.md, binding AWS sign-in (C6.10)"
+  },
+  "cl-1f26ac9a4ce4": {
+   "first_seen": "docs/DEPLOYMENT.md, binding AWS sign-in (C6.9)"
+  },
+  "cl-cc963e964b60": {
+   "first_seen": "docs/DEPLOYMENT.md, binding AWS sign-in (C6.9)"
   }
  },
  "retired": {
@@ -1560,6 +1572,8 @@
     "C6.6": "E",
     "C6.7": "E",
     "C6.8": "E",
+    "C6.9": "E",
+    "C6.10": "E",
     "C6.9": "E",
     "C6.10": "B",
     "C7.1": "E",

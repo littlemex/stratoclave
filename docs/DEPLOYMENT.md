@@ -962,6 +962,27 @@ See [CLI_GUIDE.md](CLI_GUIDE.md) for the full usage.
 
 ---
 
+## Binding AWS sign-in to this gateway
+
+Signing in with an AWS identity (`stratoclave auth sso`, Vouch-by-STS) works by the CLI signing an STS `GetCallerIdentity` request and handing it to the gateway, which forwards it to STS to learn who the caller is. A signed request of that kind is not specific to the service it was made for: another service that verifies identity the same way (HashiCorp Vault's AWS auth is the best-known) could pass on a request it received, and the gateway would accept it inside the 5 minute window AWS allows for a signature. To stop that, CLI 0.2.1 and later add a header to the request before signing it, `X-Stratoclave-Audience`, set to the host of the gateway URL the request is sent to. Because the header is signed, STS refuses any change to it, and the gateway refuses a request that names a host other than its own (`STRATOCLAVE_API_ENDPOINT`, plus any `STRATOCLAVE_STS_AUDIENCES`).
+
+The protection is only in force once the gateway requires the header; until then a request without it is still accepted, so that older CLIs keep working. To turn it on:
+
+1. Make sure `STRATOCLAVE_API_ENDPOINT` (and `STRATOCLAVE_STS_AUDIENCES` if the gateway is reached under more than one name) lists every URL users set the CLI up against.
+2. Have everyone upgrade to CLI 0.2.1 or later.
+3. Watch the gateway's `sso_sts_exchange_verified` log events: each carries `audience_bound`, true for an upgraded CLI and false for an older one. When no `false` has appeared for as long as your slowest user takes to upgrade, go on.
+4. Set `STRATOCLAVE_STS_AUDIENCE_REQUIRED=true` and redeploy. The gateway refuses to start if it has no API URL to compare with.
+
+A CloudWatch Logs Insights query for step 3:
+
+```text
+fields @timestamp, arn, audience_bound
+| filter @message like /sso_sts_exchange_verified/ and audience_bound = 0
+| stats count() by arn
+```
+
+Two limits remain. Sign-in routes are rate-limited by client address; behind a NAT, and on the private entry where every request arrives from the load balancer, that limit is shared by everyone, so one noisy client can slow sign-in for all. Requests that fail authentication are refused before the rate limiter sees them, so they are not counted against any user.
+
 ## Backend environment variables
 
 Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you can reproduce them locally or diagnose missing-value bugs.
@@ -977,7 +998,9 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `OIDC_AUDIENCE`                          | yes                     | yes (equals client ID) | |
 | `BEDROCK_REGION`                         | yes                     | yes (= `BEDROCK_PRIMARY_REGION`) | Region Claude models are invoked in — the **model** primary region, independent of the deploy region. Always set explicitly by CDK. See `STRATOCLAVE_REGION` / `BEDROCK_PRIMARY_REGION`. |
 | `DEFAULT_BEDROCK_MODEL`                  | yes                     | yes         | |
-| `STRATOCLAVE_API_ENDPOINT`               | yes                     | yes         | Published in `/.well-known/stratoclave-config`. |
+| `STRATOCLAVE_API_ENDPOINT`               | yes                     | yes         | Published in `/.well-known/stratoclave-config`. Outside a local environment (`ENVIRONMENT` `development`, `local` or `test`) the gateway refuses to start without it, and the document is never built from request headers. Its host is also what a signed AWS sign-in must name (see [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)). |
+| `STRATOCLAVE_STS_AUDIENCES`              | no                      | no          | Comma-separated extra URLs this gateway is reached under, whose hosts a signed AWS sign-in may also name. Every entry must be an absolute http(s) URL, or the gateway refuses to start. |
+| `STRATOCLAVE_STS_AUDIENCE_REQUIRED`      | no                      | no          | When on, an AWS sign-in whose signed request does not name this gateway's host is refused. Off by default so CLIs older than 0.2.1 keep working; see the runbook below. |
 | `STRATOCLAVE_PREFIX`                     | yes                     | yes (`stratoclave`) | DynamoDB, Secrets, and SSM key prefix. |
 | `DYNAMODB_USERS_TABLE`                   | yes                     | yes         | |
 | `DYNAMODB_USER_TENANTS_TABLE`            | yes                     | yes         | |

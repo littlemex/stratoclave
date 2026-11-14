@@ -36,6 +36,19 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Upgrade notes
 
+- **`STRATOCLAVE_API_ENDPOINT` is required outside a local environment.** The gateway refuses
+  to start without it unless `ENVIRONMENT` is `development`, `local` or `test`, and
+  `/.well-known/stratoclave-config` answers 503 rather than build its URL from request headers.
+  The CDK app always sets it. The document is now `Cache-Control: no-store`.
+- **AWS sign-in can be bound to this gateway (CLI 0.2.1).** The CLI signs
+  `X-Stratoclave-Audience`, the host of the gateway URL; the gateway refuses a request naming
+  another host, and with `STRATOCLAVE_STS_AUDIENCE_REQUIRED=true` refuses one without it. Off
+  by default; turn it on after every CLI is upgraded (docs/DEPLOYMENT.md, "Binding AWS sign-in
+  to this gateway").
+- **Rate limits on authenticated routes are per verified user**, not per client address, so
+  users behind one NAT or on the private entry no longer share a bucket. Sign-in routes are
+  still per address.
+
 - **The gateway refuses to start when `DEFAULT_ORG_ID` does not pass the marker value rule**
   (1 to 256 ASCII letters, digits and `:_@$#=/+,.-`, inner spaces allowed, none leading or
   trailing), and no tenant row is written with such an id. The check runs before the seed.
