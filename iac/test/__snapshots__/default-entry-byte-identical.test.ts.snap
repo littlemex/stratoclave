@@ -1,0 +1,1752 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`STRATOCLAVE_ENTRY unset (default): template output is pinned, stack-for-stack alb stack template is byte-for-byte pinned 1`] = `
+{
+  "Description": "[defaultentrytest] Internet-facing ALB",
+  "Outputs": {
+    "AlbArn": {
+      "Value": {
+        "Ref": "Alb16C2F182",
+      },
+    },
+    "AlbDnsName": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Alb16C2F182",
+          "DNSName",
+        ],
+      },
+    },
+    "ExportsOutputFnGetAttAlb16C2F182DNSNameB67BDABC": {
+      "Export": {
+        "Name": "defaultentrytest-alb:ExportsOutputFnGetAttAlb16C2F182DNSNameB67BDABC",
+      },
+      "Value": {
+        "Fn::GetAtt": [
+          "Alb16C2F182",
+          "DNSName",
+        ],
+      },
+    },
+    "ExportsOutputRefBackendTargetGroupECF989302A4524FE": {
+      "Export": {
+        "Name": "defaultentrytest-alb:ExportsOutputRefBackendTargetGroupECF989302A4524FE",
+      },
+      "Value": {
+        "Ref": "BackendTargetGroupECF98930",
+      },
+    },
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+  },
+  "Resources": {
+    "Alb16C2F182": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-alb/Alb/Resource",
+      },
+      "Properties": {
+        "LoadBalancerAttributes": [
+          {
+            "Key": "deletion_protection.enabled",
+            "Value": "false",
+          },
+          {
+            "Key": "routing.http2.enabled",
+            "Value": "true",
+          },
+        ],
+        "Name": "defaultentrytest-alb",
+        "Scheme": "internet-facing",
+        "SecurityGroups": [
+          {
+            "Fn::ImportValue": "defaultentrytest-network:ExportsOutputFnGetAttAlbSecurityGroup86A59E99GroupIdE3A37BC7",
+          },
+        ],
+        "Subnets": [
+          {
+            "Fn::ImportValue": "defaultentrytest-network:ExportsOutputRefVpcPublicSubnet1Subnet5C2D37C4FFA2B456",
+          },
+          {
+            "Fn::ImportValue": "defaultentrytest-network:ExportsOutputRefVpcPublicSubnet2Subnet691E08A351552740",
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "ALB",
+          },
+        ],
+        "Type": "application",
+      },
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+    },
+    "AlbArnParam1C6FD837": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-alb/AlbArnParam/Resource",
+      },
+      "Properties": {
+        "Description": "ALB ARN",
+        "Name": "/defaultentrytest/alb/arn",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "ALB",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Ref": "Alb16C2F182",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "AlbDnsParam0FECC74C": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-alb/AlbDnsParam/Resource",
+      },
+      "Properties": {
+        "Description": "ALB DNS name",
+        "Name": "/defaultentrytest/alb/dns-name",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "ALB",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Fn::GetAtt": [
+            "Alb16C2F182",
+            "DNSName",
+          ],
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "AlbHttpListener00C8B33E": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-alb/Alb/HttpListener/Resource",
+      },
+      "Properties": {
+        "DefaultActions": [
+          {
+            "TargetGroupArn": {
+              "Ref": "BackendTargetGroupECF98930",
+            },
+            "Type": "forward",
+          },
+        ],
+        "LoadBalancerArn": {
+          "Ref": "Alb16C2F182",
+        },
+        "Port": 80,
+        "Protocol": "HTTP",
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "ALB",
+          },
+        ],
+      },
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+    },
+    "AlbTargetGroupArnParamAB0FD9FB": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-alb/AlbTargetGroupArnParam/Resource",
+      },
+      "Properties": {
+        "Description": "ALB Target Group ARN",
+        "Name": "/defaultentrytest/alb/target-group-arn",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "ALB",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Ref": "BackendTargetGroupECF98930",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "BackendTargetGroupECF98930": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-alb/BackendTargetGroup/Resource",
+      },
+      "Properties": {
+        "HealthCheckIntervalSeconds": 30,
+        "HealthCheckPath": "/health",
+        "HealthCheckProtocol": "HTTP",
+        "HealthCheckTimeoutSeconds": 5,
+        "HealthyThresholdCount": 2,
+        "Name": "defaultentrytest-backend-tg",
+        "Port": 8000,
+        "Protocol": "HTTP",
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "ALB",
+          },
+        ],
+        "TargetGroupAttributes": [
+          {
+            "Key": "deregistration_delay.timeout_seconds",
+            "Value": "30",
+          },
+          {
+            "Key": "stickiness.enabled",
+            "Value": "false",
+          },
+          {
+            "Key": "load_balancing.algorithm.type",
+            "Value": "least_outstanding_requests",
+          },
+        ],
+        "TargetType": "ip",
+        "UnhealthyThresholdCount": 3,
+        "VpcId": {
+          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputRefVpc8378EB38272D6E3A",
+        },
+      },
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;
+
+exports[`STRATOCLAVE_ENTRY unset (default): template output is pinned, stack-for-stack cognito stack template is byte-for-byte pinned 1`] = `
+{
+  "Description": "[defaultentrytest] Cognito User Pool (Hosted UI, User/Pass auth for CLI)",
+  "Outputs": {
+    "CallbackUrls": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "http://127.0.0.1:18080/callback, http://localhost:3003/callback, https://",
+            {
+              "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+            },
+            "/callback",
+          ],
+        ],
+      },
+    },
+    "CognitoDomain": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "https://defaultentrytest-auth-",
+            {
+              "Ref": "AWS::AccountId",
+            },
+            ".auth.us-east-1.amazoncognito.com",
+          ],
+        ],
+      },
+    },
+    "ExportsOutputFnGetAttUserPool6BA7E5F2Arn686ACC00": {
+      "Export": {
+        "Name": "defaultentrytest-cognito:ExportsOutputFnGetAttUserPool6BA7E5F2Arn686ACC00",
+      },
+      "Value": {
+        "Fn::GetAtt": [
+          "UserPool6BA7E5F2",
+          "Arn",
+        ],
+      },
+    },
+    "ExportsOutputRefUserPool6BA7E5F296FD7236": {
+      "Export": {
+        "Name": "defaultentrytest-cognito:ExportsOutputRefUserPool6BA7E5F296FD7236",
+      },
+      "Value": {
+        "Ref": "UserPool6BA7E5F2",
+      },
+    },
+    "ExportsOutputRefUserPoolClient43258C81F27210F0": {
+      "Export": {
+        "Name": "defaultentrytest-cognito:ExportsOutputRefUserPoolClient43258C81F27210F0",
+      },
+      "Value": {
+        "Ref": "UserPoolClient43258C81",
+      },
+    },
+    "OidcIssuerUrl": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "https://cognito-idp.us-east-1.amazonaws.com/",
+            {
+              "Ref": "UserPool6BA7E5F2",
+            },
+          ],
+        ],
+      },
+    },
+    "UserPoolClientId": {
+      "Value": {
+        "Ref": "UserPoolClient43258C81",
+      },
+    },
+    "UserPoolId": {
+      "Value": {
+        "Ref": "UserPool6BA7E5F2",
+      },
+    },
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+  },
+  "Resources": {
+    "CognitoClientIdParam3716DA97": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-cognito/CognitoClientIdParam/Resource",
+      },
+      "Properties": {
+        "Description": "Cognito App Client ID",
+        "Name": "/defaultentrytest/cognito/client-id",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "Cognito",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Ref": "UserPoolClient43258C81",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "CognitoDomainParam8CC6A8D8": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-cognito/CognitoDomainParam/Resource",
+      },
+      "Properties": {
+        "Description": "Cognito Hosted UI domain",
+        "Name": "/defaultentrytest/cognito/domain",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "Cognito",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Fn::Join": [
+            "",
+            [
+              "https://defaultentrytest-auth-",
+              {
+                "Ref": "AWS::AccountId",
+              },
+              ".auth.us-east-1.amazoncognito.com",
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "CognitoIssuerParamAEAC375A": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-cognito/CognitoIssuerParam/Resource",
+      },
+      "Properties": {
+        "Description": "OIDC issuer URL",
+        "Name": "/defaultentrytest/cognito/oidc-issuer",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "Cognito",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Fn::Join": [
+            "",
+            [
+              "https://cognito-idp.us-east-1.amazonaws.com/",
+              {
+                "Ref": "UserPool6BA7E5F2",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "CognitoRegionParam776F55A1": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-cognito/CognitoRegionParam/Resource",
+      },
+      "Properties": {
+        "Description": "Cognito region",
+        "Name": "/defaultentrytest/cognito/region",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "Cognito",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": "us-east-1",
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "CognitoUserPoolIdParam26C934B6": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-cognito/CognitoUserPoolIdParam/Resource",
+      },
+      "Properties": {
+        "Description": "Cognito User Pool ID",
+        "Name": "/defaultentrytest/cognito/user-pool-id",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "Cognito",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Ref": "UserPool6BA7E5F2",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "UserPool6BA7E5F2": {
+      "DeletionPolicy": "Delete",
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-cognito/UserPool/Resource",
+      },
+      "Properties": {
+        "AccountRecoverySetting": {
+          "RecoveryMechanisms": [
+            {
+              "Name": "verified_email",
+              "Priority": 1,
+            },
+          ],
+        },
+        "AdminCreateUserConfig": {
+          "AllowAdminCreateUserOnly": true,
+        },
+        "AutoVerifiedAttributes": [
+          "email",
+        ],
+        "EmailVerificationMessage": "The verification code to your new account is {####}",
+        "EmailVerificationSubject": "Verify your new account",
+        "Policies": {
+          "PasswordPolicy": {
+            "MinimumLength": 12,
+            "RequireLowercase": true,
+            "RequireNumbers": true,
+            "RequireSymbols": true,
+            "RequireUppercase": true,
+            "TemporaryPasswordValidityDays": 7,
+          },
+        },
+        "Schema": [
+          {
+            "Mutable": true,
+            "Name": "email",
+            "Required": true,
+          },
+          {
+            "AttributeDataType": "String",
+            "Mutable": true,
+            "Name": "org_id",
+            "StringAttributeConstraints": {
+              "MaxLength": "256",
+              "MinLength": "1",
+            },
+          },
+        ],
+        "SmsVerificationMessage": "The verification code to your new account is {####}",
+        "UserPoolName": "defaultentrytest-user-pool",
+        "UserPoolTags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "Cognito",
+        },
+        "UsernameAttributes": [
+          "email",
+        ],
+        "VerificationMessageTemplate": {
+          "DefaultEmailOption": "CONFIRM_WITH_CODE",
+          "EmailMessage": "The verification code to your new account is {####}",
+          "EmailSubject": "Verify your new account",
+          "SmsMessage": "The verification code to your new account is {####}",
+        },
+      },
+      "Type": "AWS::Cognito::UserPool",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "UserPoolClient43258C81": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-cognito/UserPool/Client/Resource",
+      },
+      "Properties": {
+        "AccessTokenValidity": 60,
+        "AllowedOAuthFlows": [
+          "code",
+        ],
+        "AllowedOAuthFlowsUserPoolClient": true,
+        "AllowedOAuthScopes": [
+          "openid",
+          "email",
+          "profile",
+        ],
+        "CallbackURLs": [
+          "http://127.0.0.1:18080/callback",
+          "http://localhost:3003/callback",
+          {
+            "Fn::Join": [
+              "",
+              [
+                "https://",
+                {
+                  "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+                },
+                "/callback",
+              ],
+            ],
+          },
+        ],
+        "ClientName": "defaultentrytest-client",
+        "ExplicitAuthFlows": [
+          "ALLOW_USER_PASSWORD_AUTH",
+          "ALLOW_ADMIN_USER_PASSWORD_AUTH",
+          "ALLOW_USER_SRP_AUTH",
+          "ALLOW_REFRESH_TOKEN_AUTH",
+        ],
+        "GenerateSecret": false,
+        "IdTokenValidity": 60,
+        "LogoutURLs": [
+          "http://127.0.0.1:18080",
+          "http://localhost:3003",
+          {
+            "Fn::Join": [
+              "",
+              [
+                "https://",
+                {
+                  "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+                },
+              ],
+            ],
+          },
+        ],
+        "PreventUserExistenceErrors": "ENABLED",
+        "RefreshTokenValidity": 43200,
+        "SupportedIdentityProviders": [
+          "COGNITO",
+        ],
+        "TokenValidityUnits": {
+          "AccessToken": "minutes",
+          "IdToken": "minutes",
+          "RefreshToken": "minutes",
+        },
+        "UserPoolId": {
+          "Ref": "UserPool6BA7E5F2",
+        },
+      },
+      "Type": "AWS::Cognito::UserPoolClient",
+    },
+    "UserPoolDomainD0EA232A": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-cognito/UserPool/Domain/Resource",
+      },
+      "Properties": {
+        "Domain": {
+          "Fn::Join": [
+            "",
+            [
+              "defaultentrytest-auth-",
+              {
+                "Ref": "AWS::AccountId",
+              },
+            ],
+          ],
+        },
+        "UserPoolId": {
+          "Ref": "UserPool6BA7E5F2",
+        },
+      },
+      "Type": "AWS::Cognito::UserPoolDomain",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;
+
+exports[`STRATOCLAVE_ENTRY unset (default): template output is pinned, stack-for-stack network stack template is byte-for-byte pinned 1`] = `
+{
+  "Description": "[defaultentrytest] VPC + Public Subnets + SGs",
+  "Outputs": {
+    "ExportsOutputFnGetAttAlbSecurityGroup86A59E99GroupIdE3A37BC7": {
+      "Export": {
+        "Name": "defaultentrytest-network:ExportsOutputFnGetAttAlbSecurityGroup86A59E99GroupIdE3A37BC7",
+      },
+      "Value": {
+        "Fn::GetAtt": [
+          "AlbSecurityGroup86A59E99",
+          "GroupId",
+        ],
+      },
+    },
+    "ExportsOutputFnGetAttEcsSecurityGroup44008BF1GroupIdDE2CA5C5": {
+      "Export": {
+        "Name": "defaultentrytest-network:ExportsOutputFnGetAttEcsSecurityGroup44008BF1GroupIdDE2CA5C5",
+      },
+      "Value": {
+        "Fn::GetAtt": [
+          "EcsSecurityGroup44008BF1",
+          "GroupId",
+        ],
+      },
+    },
+    "ExportsOutputRefVpc8378EB38272D6E3A": {
+      "Export": {
+        "Name": "defaultentrytest-network:ExportsOutputRefVpc8378EB38272D6E3A",
+      },
+      "Value": {
+        "Ref": "Vpc8378EB38",
+      },
+    },
+    "ExportsOutputRefVpcPublicSubnet1Subnet5C2D37C4FFA2B456": {
+      "Export": {
+        "Name": "defaultentrytest-network:ExportsOutputRefVpcPublicSubnet1Subnet5C2D37C4FFA2B456",
+      },
+      "Value": {
+        "Ref": "VpcPublicSubnet1Subnet5C2D37C4",
+      },
+    },
+    "ExportsOutputRefVpcPublicSubnet2Subnet691E08A351552740": {
+      "Export": {
+        "Name": "defaultentrytest-network:ExportsOutputRefVpcPublicSubnet2Subnet691E08A351552740",
+      },
+      "Value": {
+        "Ref": "VpcPublicSubnet2Subnet691E08A3",
+      },
+    },
+    "ParameterStoreBase": {
+      "Description": "SSM Parameter Store base path",
+      "Value": "/defaultentrytest/",
+    },
+    "VpcId": {
+      "Description": "VPC ID",
+      "Value": {
+        "Ref": "Vpc8378EB38",
+      },
+    },
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+  },
+  "Resources": {
+    "AWS679f53fac002430cb0da5b7982bd22872D164C4C": {
+      "DependsOn": [
+        "AWS679f53fac002430cb0da5b7982bd2287ServiceRoleC1EA0FF2",
+      ],
+      "Metadata": {
+        "aws:asset:is-bundled": false,
+        "aws:asset:path": "asset.<ASSET_HASH>",
+        "aws:asset:property": "Code",
+        "aws:cdk:path": "defaultentrytest-network/AWS679f53fac002430cb0da5b7982bd2287/Resource",
+      },
+      "Properties": {
+        "Code": {
+          "S3Bucket": "cdk-hnb659fds-assets-123456789012-us-east-1",
+          "S3Key": "<ASSET_HASH>.zip",
+        },
+        "Handler": "index.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "AWS679f53fac002430cb0da5b7982bd2287ServiceRoleC1EA0FF2",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+        "Timeout": 120,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "AWS679f53fac002430cb0da5b7982bd2287ServiceRoleC1EA0FF2": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource",
+      },
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "AlbSecurityGroup86A59E99": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/AlbSecurityGroup/Resource",
+      },
+      "Properties": {
+        "GroupDescription": "Security group for defaultentrytest ALB",
+        "GroupName": "defaultentrytest-alb-sg",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow all outbound traffic by default",
+            "IpProtocol": "-1",
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "AlbSecurityGroupfromIndirectPeer80C02E7218": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/AlbSecurityGroup/from {IndirectPeer}:80",
+      },
+      "Properties": {
+        "Description": "Allow HTTP from CloudFront edge locations only",
+        "FromPort": 80,
+        "GroupId": {
+          "Fn::GetAtt": [
+            "AlbSecurityGroup86A59E99",
+            "GroupId",
+          ],
+        },
+        "IpProtocol": "tcp",
+        "SourcePrefixListId": {
+          "Fn::GetAtt": [
+            "CloudFrontOriginFacingPrefixListLookupE17CADC1",
+            "PrefixLists.0.PrefixListId",
+          ],
+        },
+        "ToPort": 80,
+      },
+      "Type": "AWS::EC2::SecurityGroupIngress",
+    },
+    "AlbSgIdParamD52449EF": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/AlbSgIdParam/Resource",
+      },
+      "Properties": {
+        "Description": "ALB Security Group ID",
+        "Name": "/defaultentrytest/network/alb-sg-id",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "Network",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Fn::GetAtt": [
+            "AlbSecurityGroup86A59E99",
+            "GroupId",
+          ],
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "CloudFrontOriginFacingPrefixListLookupCustomResourcePolicy71ED6615": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/CloudFrontOriginFacingPrefixListLookup/CustomResourcePolicy/Resource",
+      },
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "ec2:DescribeManagedPrefixLists",
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "CloudFrontOriginFacingPrefixListLookupCustomResourcePolicy71ED6615",
+        "Roles": [
+          {
+            "Ref": "AWS679f53fac002430cb0da5b7982bd2287ServiceRoleC1EA0FF2",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "CloudFrontOriginFacingPrefixListLookupE17CADC1": {
+      "DeletionPolicy": "Delete",
+      "DependsOn": [
+        "CloudFrontOriginFacingPrefixListLookupCustomResourcePolicy71ED6615",
+      ],
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/CloudFrontOriginFacingPrefixListLookup/Resource/Default",
+      },
+      "Properties": {
+        "Create": "{"service":"EC2","action":"describeManagedPrefixLists","parameters":{"Filters":[{"Name":"prefix-list-name","Values":["com.amazonaws.global.cloudfront.origin-facing"]}]},"physicalResourceId":{"id":"cloudfront-origin-facing-prefix-list"}}",
+        "InstallLatestAwsSdk": false,
+        "ServiceToken": {
+          "Fn::GetAtt": [
+            "AWS679f53fac002430cb0da5b7982bd22872D164C4C",
+            "Arn",
+          ],
+        },
+        "Update": "{"service":"EC2","action":"describeManagedPrefixLists","parameters":{"Filters":[{"Name":"prefix-list-name","Values":["com.amazonaws.global.cloudfront.origin-facing"]}]},"physicalResourceId":{"id":"cloudfront-origin-facing-prefix-list"}}",
+      },
+      "Type": "Custom::AWS",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "CustomVpcRestrictDefaultSGCustomResourceProviderHandlerDC833E5E": {
+      "DependsOn": [
+        "CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0",
+      ],
+      "Metadata": {
+        "aws:asset:path": "asset.<ASSET_HASH>",
+        "aws:asset:property": "Code",
+        "aws:cdk:path": "defaultentrytest-network/Custom::VpcRestrictDefaultSGCustomResourceProvider/Handler",
+      },
+      "Properties": {
+        "Code": {
+          "S3Bucket": "cdk-hnb659fds-assets-123456789012-us-east-1",
+          "S3Key": "<ASSET_HASH>.zip",
+        },
+        "Description": "Lambda function for removing all inbound/outbound rules from the VPC default security group",
+        "Handler": "__entrypoint__.handler",
+        "MemorySize": 128,
+        "Role": {
+          "Fn::GetAtt": [
+            "CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 900,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Custom::VpcRestrictDefaultSGCustomResourceProvider/Role",
+      },
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:\${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+          },
+        ],
+        "Policies": [
+          {
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Action": [
+                    "ec2:AuthorizeSecurityGroupIngress",
+                    "ec2:AuthorizeSecurityGroupEgress",
+                    "ec2:RevokeSecurityGroupIngress",
+                    "ec2:RevokeSecurityGroupEgress",
+                  ],
+                  "Effect": "Allow",
+                  "Resource": [
+                    {
+                      "Fn::Join": [
+                        "",
+                        [
+                          "arn:aws:ec2:us-east-1:123456789012:security-group/",
+                          {
+                            "Fn::GetAtt": [
+                              "Vpc8378EB38",
+                              "DefaultSecurityGroup",
+                            ],
+                          },
+                        ],
+                      ],
+                    },
+                  ],
+                },
+              ],
+              "Version": "2012-10-17",
+            },
+            "PolicyName": "Inline",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "EcsSecurityGroup44008BF1": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/EcsSecurityGroup/Resource",
+      },
+      "Properties": {
+        "GroupDescription": "Security group for defaultentrytest ECS Fargate tasks",
+        "GroupName": "defaultentrytest-ecs-sg",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "HTTPS to AWS service endpoints (Bedrock, STS, Cognito, DynamoDB, ECR, CloudWatch)",
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "DNS resolution (Route 53 Resolver for AWS endpoint hostnames)",
+            "FromPort": 53,
+            "IpProtocol": "udp",
+            "ToPort": 53,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "EcsSecurityGroupfromdefaultentrytestnetworkAlbSecurityGroupF7BE8E1C8000061BACFE": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/EcsSecurityGroup/from defaultentrytestnetworkAlbSecurityGroupF7BE8E1C:8000",
+      },
+      "Properties": {
+        "Description": "Allow traffic from ALB on port 8000",
+        "FromPort": 8000,
+        "GroupId": {
+          "Fn::GetAtt": [
+            "EcsSecurityGroup44008BF1",
+            "GroupId",
+          ],
+        },
+        "IpProtocol": "tcp",
+        "SourceSecurityGroupId": {
+          "Fn::GetAtt": [
+            "AlbSecurityGroup86A59E99",
+            "GroupId",
+          ],
+        },
+        "ToPort": 8000,
+      },
+      "Type": "AWS::EC2::SecurityGroupIngress",
+    },
+    "EcsSgIdParamEAD3720E": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/EcsSgIdParam/Resource",
+      },
+      "Properties": {
+        "Description": "ECS Security Group ID",
+        "Name": "/defaultentrytest/network/ecs-sg-id",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "Network",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Fn::GetAtt": [
+            "EcsSecurityGroup44008BF1",
+            "GroupId",
+          ],
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "PublicSubnetIdsParam26DA81CB": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/PublicSubnetIdsParam/Resource",
+      },
+      "Properties": {
+        "Description": "Public Subnet IDs (comma-separated)",
+        "Name": "/defaultentrytest/network/public-subnet-ids",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "Network",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Ref": "VpcPublicSubnet1Subnet5C2D37C4",
+              },
+              ",",
+              {
+                "Ref": "VpcPublicSubnet2Subnet691E08A3",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "Vpc8378EB38": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/Resource",
+      },
+      "Properties": {
+        "CidrBlock": "10.0.0.0/16",
+        "EnableDnsHostnames": true,
+        "EnableDnsSupport": true,
+        "InstanceTenancy": "default",
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Name",
+            "Value": "defaultentrytest-vpc",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::VPC",
+    },
+    "VpcFlowLogsGroupC5F6A8C5": {
+      "DeletionPolicy": "Delete",
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/VpcFlowLogsGroup/Resource",
+      },
+      "Properties": {
+        "LogGroupName": "/aws/vpc/defaultentrytest-flow-logs",
+        "RetentionInDays": 30,
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "VpcIGWD7BA715C": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/IGW",
+      },
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Name",
+            "Value": "defaultentrytest-vpc",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::InternetGateway",
+    },
+    "VpcIdParamE55A048C": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/VpcIdParam/Resource",
+      },
+      "Properties": {
+        "Description": "VPC ID",
+        "Name": "/defaultentrytest/network/vpc-id",
+        "Tags": {
+          "ManagedBy": "CDK",
+          "Prefix": "defaultentrytest",
+          "Project": "Stratoclave",
+          "Stack": "Network",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Ref": "Vpc8378EB38",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "VpcPublicSubnet1DefaultRoute3DA9E72A": {
+      "DependsOn": [
+        "VpcVPCGWBF912B6E",
+      ],
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/PublicSubnet1/DefaultRoute",
+      },
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "VpcIGWD7BA715C",
+        },
+        "RouteTableId": {
+          "Ref": "VpcPublicSubnet1RouteTable6C95E38E",
+        },
+      },
+      "Type": "AWS::EC2::Route",
+    },
+    "VpcPublicSubnet1RouteTable6C95E38E": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/PublicSubnet1/RouteTable",
+      },
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Name",
+            "Value": "defaultentrytest-network/Vpc/PublicSubnet1",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38",
+        },
+      },
+      "Type": "AWS::EC2::RouteTable",
+    },
+    "VpcPublicSubnet1RouteTableAssociation97140677": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/PublicSubnet1/RouteTableAssociation",
+      },
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "VpcPublicSubnet1RouteTable6C95E38E",
+        },
+        "SubnetId": {
+          "Ref": "VpcPublicSubnet1Subnet5C2D37C4",
+        },
+      },
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+    },
+    "VpcPublicSubnet1Subnet5C2D37C4": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/PublicSubnet1/Subnet",
+      },
+      "Properties": {
+        "AvailabilityZone": "us-east-1a",
+        "CidrBlock": "10.0.0.0/24",
+        "MapPublicIpOnLaunch": true,
+        "Tags": [
+          {
+            "Key": "aws-cdk:subnet-name",
+            "Value": "Public",
+          },
+          {
+            "Key": "aws-cdk:subnet-type",
+            "Value": "Public",
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Name",
+            "Value": "defaultentrytest-network/Vpc/PublicSubnet1",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38",
+        },
+      },
+      "Type": "AWS::EC2::Subnet",
+    },
+    "VpcPublicSubnet2DefaultRoute97F91067": {
+      "DependsOn": [
+        "VpcVPCGWBF912B6E",
+      ],
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/PublicSubnet2/DefaultRoute",
+      },
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "VpcIGWD7BA715C",
+        },
+        "RouteTableId": {
+          "Ref": "VpcPublicSubnet2RouteTable94F7E489",
+        },
+      },
+      "Type": "AWS::EC2::Route",
+    },
+    "VpcPublicSubnet2RouteTable94F7E489": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/PublicSubnet2/RouteTable",
+      },
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Name",
+            "Value": "defaultentrytest-network/Vpc/PublicSubnet2",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38",
+        },
+      },
+      "Type": "AWS::EC2::RouteTable",
+    },
+    "VpcPublicSubnet2RouteTableAssociationDD5762D8": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/PublicSubnet2/RouteTableAssociation",
+      },
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "VpcPublicSubnet2RouteTable94F7E489",
+        },
+        "SubnetId": {
+          "Ref": "VpcPublicSubnet2Subnet691E08A3",
+        },
+      },
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+    },
+    "VpcPublicSubnet2Subnet691E08A3": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/PublicSubnet2/Subnet",
+      },
+      "Properties": {
+        "AvailabilityZone": "us-east-1b",
+        "CidrBlock": "10.0.1.0/24",
+        "MapPublicIpOnLaunch": true,
+        "Tags": [
+          {
+            "Key": "aws-cdk:subnet-name",
+            "Value": "Public",
+          },
+          {
+            "Key": "aws-cdk:subnet-type",
+            "Value": "Public",
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Name",
+            "Value": "defaultentrytest-network/Vpc/PublicSubnet2",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38",
+        },
+      },
+      "Type": "AWS::EC2::Subnet",
+    },
+    "VpcRestrictDefaultSecurityGroupCustomResourceC73DA2BE": {
+      "DeletionPolicy": "Delete",
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/RestrictDefaultSecurityGroupCustomResource/Default",
+      },
+      "Properties": {
+        "Account": "123456789012",
+        "DefaultSecurityGroupId": {
+          "Fn::GetAtt": [
+            "Vpc8378EB38",
+            "DefaultSecurityGroup",
+          ],
+        },
+        "ServiceToken": {
+          "Fn::GetAtt": [
+            "CustomVpcRestrictDefaultSGCustomResourceProviderHandlerDC833E5E",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "Custom::VpcRestrictDefaultSG",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "VpcVPCGWBF912B6E": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/VPCGW",
+      },
+      "Properties": {
+        "InternetGatewayId": {
+          "Ref": "VpcIGWD7BA715C",
+        },
+        "VpcId": {
+          "Ref": "Vpc8378EB38",
+        },
+      },
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+    },
+    "VpcVpcFlowLogsFlowLogC0A529B2": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/VpcFlowLogs/FlowLog",
+      },
+      "Properties": {
+        "DeliverLogsPermissionArn": {
+          "Fn::GetAtt": [
+            "VpcVpcFlowLogsIAMRole85B9EB22",
+            "Arn",
+          ],
+        },
+        "LogDestinationType": "cloud-watch-logs",
+        "LogGroupName": {
+          "Ref": "VpcFlowLogsGroupC5F6A8C5",
+        },
+        "ResourceId": {
+          "Ref": "Vpc8378EB38",
+        },
+        "ResourceType": "VPC",
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Name",
+            "Value": "defaultentrytest-network/Vpc/VpcFlowLogs",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+        "TrafficType": "ALL",
+      },
+      "Type": "AWS::EC2::FlowLog",
+    },
+    "VpcVpcFlowLogsIAMRole85B9EB22": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/VpcFlowLogs/IAMRole/Resource",
+      },
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "vpc-flow-logs.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "CDK",
+          },
+          {
+            "Key": "Name",
+            "Value": "defaultentrytest-network/Vpc/VpcFlowLogs",
+          },
+          {
+            "Key": "Prefix",
+            "Value": "defaultentrytest",
+          },
+          {
+            "Key": "Project",
+            "Value": "Stratoclave",
+          },
+          {
+            "Key": "Stack",
+            "Value": "Network",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "VpcVpcFlowLogsIAMRoleDefaultPolicyDD9BFCFE": {
+      "Metadata": {
+        "aws:cdk:path": "defaultentrytest-network/Vpc/VpcFlowLogs/IAMRole/DefaultPolicy/Resource",
+      },
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:DescribeLogStreams",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "VpcFlowLogsGroupC5F6A8C5",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "VpcVpcFlowLogsIAMRoleDefaultPolicyDD9BFCFE",
+        "Roles": [
+          {
+            "Ref": "VpcVpcFlowLogsIAMRole85B9EB22",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;
+
+exports[`STRATOCLAVE_ENTRY unset (default): template output is pinned, stack-for-stack the ECS task env entries this feature branches on are pinned 1`] = `
+{
+  "CORS_ORIGINS": {
+    "Fn::Join": [
+      "",
+      [
+        "https://",
+        {
+          "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+        },
+      ],
+    ],
+  },
+  "STRATOCLAVE_API_ENDPOINT": {
+    "Fn::Join": [
+      "",
+      [
+        "https://",
+        {
+          "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+        },
+      ],
+    ],
+  },
+}
+`;

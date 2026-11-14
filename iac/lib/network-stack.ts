@@ -20,6 +20,22 @@ export interface NetworkStackProps extends cdk.StackProps {
    * @default 2
    */
   maxAzs?: number;
+
+  /**
+   * `STRATOCLAVE_ENTRY` mode. @default 'cloudfront'
+   *
+   * `'cloudfront'` is exactly today's stack: the ALB security group admits
+   * only the CloudFront origin-facing prefix list on :80. `'private'` skips
+   * that lookup and that ingress rule entirely — there is no CloudFront on
+   * that path, so there is nothing for the ALB to admit from it, and the
+   * rule this stack would otherwise add would be a port (80) the private
+   * ALB never even listens on. The ALB's actual admission rule for
+   * `'private'` (from the internal NLB only, on :443) is added by
+   * `lib/private-link-stack.ts`, once the NLB's security group exists —
+   * this stack only creates the (as yet rule-less) `albSecurityGroup` for it
+   * to add that rule to.
+   */
+  entryMode?: 'cloudfront' | 'private';
 }
 
 /**
@@ -77,46 +93,57 @@ export class NetworkStack extends cdk.Stack {
     // direct ALB-DNS probe fails at the L4 boundary. CDK does not expose
     // a first-class lookup for managed prefix lists, so we resolve the ID
     // at deploy time with an AwsCustomResource (EC2 DescribeManagedPrefixLists).
-    const cloudFrontPrefixListLookup = new cr.AwsCustomResource(
-      this,
-      'CloudFrontOriginFacingPrefixListLookup',
-      {
-        onUpdate: {
-          service: 'EC2',
-          action: 'describeManagedPrefixLists',
-          parameters: {
-            Filters: [
-              {
-                Name: 'prefix-list-name',
-                Values: ['com.amazonaws.global.cloudfront.origin-facing'],
-              },
-            ],
+    //
+    // `entryMode === 'private'` (STRATOCLAVE_ENTRY=private) skips this whole
+    // block: there is no CloudFront distribution on that path, so there is
+    // nothing to admit from it, and the custom resource's own IAM policy
+    // (ANY_RESOURCE describeManagedPrefixLists) would be dead weight on a
+    // deployment that never uses it. `albSecurityGroup` is created above
+    // either way; `lib/private-link-stack.ts` is what adds its one ingress
+    // rule for that mode (from the internal NLB's security group, on :443),
+    // once that security group exists.
+    if ((props.entryMode ?? 'cloudfront') === 'cloudfront') {
+      const cloudFrontPrefixListLookup = new cr.AwsCustomResource(
+        this,
+        'CloudFrontOriginFacingPrefixListLookup',
+        {
+          onUpdate: {
+            service: 'EC2',
+            action: 'describeManagedPrefixLists',
+            parameters: {
+              Filters: [
+                {
+                  Name: 'prefix-list-name',
+                  Values: ['com.amazonaws.global.cloudfront.origin-facing'],
+                },
+              ],
+            },
+            physicalResourceId: cr.PhysicalResourceId.of(
+              'cloudfront-origin-facing-prefix-list',
+            ),
           },
-          physicalResourceId: cr.PhysicalResourceId.of(
-            'cloudfront-origin-facing-prefix-list',
-          ),
+          policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+            resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
+          }),
         },
-        policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
-          resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
-        }),
-      },
-    );
-    const cloudFrontPrefixListId = cloudFrontPrefixListLookup.getResponseField(
-      'PrefixLists.0.PrefixListId',
-    );
+      );
+      const cloudFrontPrefixListId = cloudFrontPrefixListLookup.getResponseField(
+        'PrefixLists.0.PrefixListId',
+      );
 
-    // CloudFront origin-facing prefix list contains ~50+ IP ranges. Each
-    // prefix-list ingress expands into one rule per CIDR at enforcement
-    // time and counts against the "Inbound or outbound rules per security
-    // group" quota (default 60). We only need port 80: the FrontendStack
-    // distribution talks to the ALB origin with `originProtocolPolicy:
-    // 'http-only'`, so a :443 ingress would never be used. Keeping it
-    // would double the rule count and blow past the SG quota.
-    this.albSecurityGroup.addIngressRule(
-      ec2.Peer.prefixList(cloudFrontPrefixListId),
-      ec2.Port.tcp(80),
-      'Allow HTTP from CloudFront edge locations only',
-    );
+      // CloudFront origin-facing prefix list contains ~50+ IP ranges. Each
+      // prefix-list ingress expands into one rule per CIDR at enforcement
+      // time and counts against the "Inbound or outbound rules per security
+      // group" quota (default 60). We only need port 80: the FrontendStack
+      // distribution talks to the ALB origin with `originProtocolPolicy:
+      // 'http-only'`, so a :443 ingress would never be used. Keeping it
+      // would double the rule count and blow past the SG quota.
+      this.albSecurityGroup.addIngressRule(
+        ec2.Peer.prefixList(cloudFrontPrefixListId),
+        ec2.Port.tcp(80),
+        'Allow HTTP from CloudFront edge locations only',
+      );
+    }
 
     // P0-9 (2026-04 security review): the ECS task SG used to allow all
     // outbound traffic. Combined with `assignPublicIp: ENABLED` that

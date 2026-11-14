@@ -99,4 +99,23 @@ describe('cdk synth (real bin/iac.ts) — every context-gated stack, cdk-nag mus
     },
     60_000,
   );
+
+  test(
+    'STRATOCLAVE_ENTRY=private: synth succeeds with zero AwsSolutions errors',
+    () => {
+      const result = synth([], {
+        STRATOCLAVE_ENTRY: 'private',
+        STRATOCLAVE_PRIVATE_CERTIFICATE_ARN:
+          'arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555',
+        STRATOCLAVE_PRIVATE_DOMAIN: 'stratoclave.internal.example.com',
+        STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: 'arn:aws:iam::123456789012:root',
+      });
+      const errorLines = result.output
+        .split('\n')
+        .filter((line) => line.includes('[Error at') && line.includes('AwsSolutions-'));
+      expect(errorLines).toEqual([]);
+      expect(result.failed).toBe(false);
+    },
+    120_000,
+  );
 });

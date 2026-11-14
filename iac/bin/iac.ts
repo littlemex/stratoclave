@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib';
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { AwsSolutionsChecks, NagSuppressions } from 'cdk-nag';
 import {
   capacityPlan,
@@ -14,12 +15,14 @@ import {
   putStringParameter,
 } from '../lib/_common';
 import { resolveRegionConfig } from '../lib/region-config';
+import { resolveEntryConfig } from '../lib/entry-config';
 import { NetworkStack } from '../lib/network-stack';
 import { EcrStack } from '../lib/ecr-stack';
 import { AlbStack } from '../lib/alb-stack';
 import { EcsStack } from '../lib/ecs-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { CognitoStack } from '../lib/cognito-stack';
+import { PrivateLinkStack } from '../lib/private-link-stack';
 import { DynamoDBStack } from '../lib/dynamodb-stack';
 import { LedgerProjectorStack } from '../lib/ledger-projector-stack';
 import { CertificateSchedulerStack } from '../lib/certificate-scheduler-stack';
@@ -89,6 +92,15 @@ const residencyWarnings = regionCfg.residencyWarnings;
 // forwarded below, so AWS itself — not just this synth — refuses anything
 // outside it. See docs/DEPLOYMENT.md, "Keeping inference inside a set of regions".
 const inferenceRegions = regionCfg.inferenceRegions;
+
+// STRATOCLAVE_ENTRY: 'cloudfront' (default) keeps today's stack set,
+// byte-for-byte; 'private' replaces it with an internal ALB reached only
+// through PrivateLink (see lib/entry-config.ts and docs/DEPLOYMENT.md,
+// "Private entry (PrivateLink), headless"); 'both' is refused at synth.
+// Resolved once, here, same convention as regionCfg above: every stack below
+// that cares branches on this one value rather than re-reading the env var.
+const entryConfig = resolveEntryConfig(process.env, regionCfg.bodyRegion);
+cdk.Annotations.of(app).addInfo(`[entry] STRATOCLAVE_ENTRY=${entryConfig.mode}`);
 
 // Deprecated bare env-var names (e.g. CODEX_ENABLED -> STRATOCLAVE_CODEX_ENABLED)
 // used as a fallback this synth. Surfaced immediately as CDK Annotations on the
@@ -204,6 +216,7 @@ const wafIpAllowlistEnabled =
 const networkStack = new NetworkStack(app, stackName(prefix, 'network'), {
   env,
   prefix,
+  entryMode: entryConfig.mode,
   description: `[${prefix}] VPC + Public Subnets + SGs`,
 });
 
@@ -223,21 +236,74 @@ const ecrStack = new EcrStack(app, stackName(prefix, 'ecr'), {
 });
 
 // --- 4. ALB ---
+// 'cloudfront': internet-facing, HTTP only (TLS terminates at CloudFront) —
+// exactly today's AlbStack call, unchanged.
+// 'private': internal, HTTPS :443 only with the operator's certificate, no
+// port 80 at all, and XFF stripped at the ALB (see lib/alb-stack.ts's prop
+// docs for why).
 const albStack = new AlbStack(app, stackName(prefix, 'alb'), {
   env,
   prefix,
   vpc: networkStack.vpc,
   securityGroup: networkStack.albSecurityGroup,
-  internal: false,
+  internal: entryConfig.mode === 'private',
   healthCheckPath: '/health',
   targetPort: 8000,
   // Prod: protect against accidental `cdk destroy` tearing the ALB down.
   deletionProtection: isProd,
-  description: `[${prefix}] Internet-facing ALB`,
+  ...(entryConfig.mode === 'private'
+    ? {
+        certificateArn: entryConfig.privateEntry.certificateArn,
+        domainName: entryConfig.privateEntry.domainName,
+        enableHttpListener: false,
+        xffHeaderProcessingMode: 'remove' as const,
+      }
+    : {}),
+  description:
+    entryConfig.mode === 'private'
+      ? `[${prefix}] Internal ALB (PrivateLink only, HTTPS :443 only)`
+      : `[${prefix}] Internet-facing ALB`,
 });
 albStack.addDependency(networkStack);
 
-// --- 5a. WAF (CLOUDFRONT scope, pinned to us-east-1 via `wafEnv`).
+// --- 4b. Private-entry publication (STRATOCLAVE_ENTRY=private only): an
+// internal NLB + VPC endpoint service fronting the internal ALB above. See
+// lib/private-link-stack.ts for why this shape is the one PrivateLink
+// accepts at all.
+let privateLinkStack: PrivateLinkStack | undefined;
+if (entryConfig.mode === 'private') {
+  privateLinkStack = new PrivateLinkStack(app, stackName(prefix, 'private-link'), {
+    env,
+    prefix,
+    vpc: networkStack.vpc,
+    albSecurityGroup: networkStack.albSecurityGroup,
+    // `albStack.httpsListener` is only ever undefined when AlbStack was not
+    // given a certificate; AlbStack above always receives one in this
+    // branch (entryConfig.mode === 'private'), so the listener exists. A
+    // thrown assertion is preferred to a silent `!`: if this ever stops
+    // being true, synth should fail loudly here rather than produce a
+    // broken target group.
+    albHttpsListener: ((): elbv2.ApplicationListener => {
+      if (!albStack.httpsListener) {
+        throw new Error(
+          'AlbStack.httpsListener is undefined under STRATOCLAVE_ENTRY=private; ' +
+            'AlbStack should always create it when given a certificateArn.',
+        );
+      }
+      return albStack.httpsListener;
+    })(),
+    domainName: entryConfig.privateEntry.domainName,
+    allowedPrincipals: entryConfig.privateEntry.allowedPrincipals,
+    description: `[${prefix}] Internal NLB + VPC endpoint service (PrivateLink publication)`,
+  });
+  privateLinkStack.addDependency(albStack);
+}
+
+// --- 5a. WAF (CLOUDFRONT scope, pinned to us-east-1 via `wafEnv`). Never
+// created in 'private' mode: there is no CloudFront distribution for a
+// CLOUDFRONT-scope WebACL to attach to, and the private path's own posture
+// relies on network boundary + acceptance + the app's own auth and limits,
+// not WAF.
 // The WebACL ARN is consumed by FrontendStack (below). When the body region
 // R != us-east-1 this becomes a cross-region reference, so both producer and
 // consumer set `crossRegionReferences: true`. When R == us-east-1 the flag is
@@ -247,7 +313,7 @@ albStack.addDependency(networkStack);
 // silently disable WAF (the token-based reference makes that structurally
 // impossible and also enforces deploy ordering).
 let wafStack: WafStack | undefined;
-if (enableWaf) {
+if (entryConfig.mode === 'cloudfront' && enableWaf) {
   wafStack = new WafStack(
     app,
     // Qualified by the body region: see `pinnedStackName`. Two deployments that
@@ -266,22 +332,27 @@ if (enableWaf) {
   });
 }
 
-// --- 5. Frontend (S3 + CloudFront + SPA fallback Function) ---
-const frontendStack = new FrontendStack(app, stackName(prefix, 'frontend'), {
-  env,
-  // Consumes the us-east-1 WebACL ARN. crossRegionReferences must match the
-  // producer (wafStack); only relevant when the body region != us-east-1
-  // (no-op otherwise). Enabled only when WAF is on, so there is no reference to
-  // resolve when ENABLE_WAF=false.
-  crossRegionReferences: enableWaf ? true : undefined,
-  prefix,
-  albDnsName: albStack.alb.loadBalancerDnsName,
-  webAclArn: wafStack?.webAclArn,
-  description: `[${prefix}] Frontend S3 + CloudFront`,
-});
-frontendStack.addDependency(albStack);
-if (wafStack) {
-  frontendStack.addDependency(wafStack);
+// --- 5. Frontend (S3 + CloudFront + SPA fallback Function). Never created
+// in 'private' mode: no CloudFront distribution, no S3 console bucket at
+// all — that is the whole point of "headless".
+let frontendStack: FrontendStack | undefined;
+if (entryConfig.mode === 'cloudfront') {
+  frontendStack = new FrontendStack(app, stackName(prefix, 'frontend'), {
+    env,
+    // Consumes the us-east-1 WebACL ARN. crossRegionReferences must match the
+    // producer (wafStack); only relevant when the body region != us-east-1
+    // (no-op otherwise). Enabled only when WAF is on, so there is no reference to
+    // resolve when ENABLE_WAF=false.
+    crossRegionReferences: enableWaf ? true : undefined,
+    prefix,
+    albDnsName: albStack.alb.loadBalancerDnsName,
+    webAclArn: wafStack?.webAclArn,
+    description: `[${prefix}] Frontend S3 + CloudFront`,
+  });
+  frontendStack.addDependency(albStack);
+  if (wafStack) {
+    frontendStack.addDependency(wafStack);
+  }
 }
 
 // --- 6. Cognito (cross-stack reference to the Frontend CloudFront domain) ---
@@ -297,10 +368,28 @@ const cognitoStack = new CognitoStack(app, stackName(prefix, 'cognito'), {
   // for disposable dev stacks only.
   environment: envName,
   domainPrefix: cognitoDomainPrefix,
-  cloudFrontDomainName: frontendStack.cfnDistribution.attrDomainName,
+  // `cloudFrontDomainName` is already an OPTIONAL prop (CognitoStackProps),
+  // and the Hosted-UI callback-URL logic in lib/cognito-stack.ts already
+  // guards every use of it behind `if (props.cloudFrontDomainName)` — so
+  // passing `undefined` in 'private' mode (no frontendStack to read a
+  // domain from) needs no change there at all. Cognito itself still exists
+  // on the private path: `POST /api/mvp/auth/login` (backend/mvp/cognito_auth.py)
+  // is a server-side proxy to Cognito's AdminInitiateAuth, so `stratoclave
+  // auth login` works entirely through the gateway and needs no direct
+  // client-to-Cognito network path at all — only the browser Hosted-UI OAuth
+  // redirect (used by the web console, absent on this path) needs the
+  // client to reach Cognito's own domain directly. `/.well-known/stratoclave-config`
+  // requires COGNITO_DOMAIN regardless of entry mode. Only the one callback
+  // URL that depended on a CloudFront distribution is gone; the CLI's own
+  // OAuth callback is always a loopback address (127.0.0.1:18080 /
+  // localhost:3003, both listed unconditionally above) and never touches
+  // either distribution.
+  cloudFrontDomainName: frontendStack?.cfnDistribution.attrDomainName,
   description: `[${prefix}] Cognito User Pool (Hosted UI, User/Pass auth for CLI)`,
 });
-cognitoStack.addDependency(frontendStack);
+if (frontendStack) {
+  cognitoStack.addDependency(frontendStack);
+}
 
 // --- 7. ECS (placed directly in the Public Subnet, region R) ---
 // Per-task ceilings are read here so they can be cross-checked before synth: a
@@ -517,13 +606,30 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // candidate. Read/written by mvp.discovery.promotion.
     DYNAMODB_PROMOTION_CANDIDATES_TABLE: dynamoDBStack.promotionCandidatesTable.tableName,
 
-    // CORS
-    CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,
+    // CORS. 'cloudfront': the SPA's own origin (the CloudFront distribution
+    // it is served from) — unchanged. 'private': there is no CloudFront
+    // distribution to read a domain from, so this is the private URL itself;
+    // that is a real origin a self-built browser client could run from, and
+    // it is never a wildcard (main.py's startup validation already refuses
+    // '*' regardless of entry mode).
+    CORS_ORIGINS:
+      entryConfig.mode === 'private'
+        ? `https://${entryConfig.privateEntry.domainName}`
+        : `https://${frontendStack!.cfnDistribution.attrDomainName}`,
 
-    // Public API endpoint (CloudFront HTTPS URL).
-    // This is the value returned as api_endpoint in /.well-known/stratoclave-config.
-    // Always return the CloudFront URL; returning the ALB URL directly would cause the CLI to call it over HTTP.
-    STRATOCLAVE_API_ENDPOINT: `https://${frontendStack.cfnDistribution.attrDomainName}`,
+    // Public API endpoint. This is the value returned as api_endpoint in
+    // /.well-known/stratoclave-config (see backend/mvp/well_known.py's own
+    // resolution order comment — this env var always wins there, in both
+    // modes, so no change was needed in that file at all).
+    // 'cloudfront': the CloudFront HTTPS URL — unchanged. Always return the
+    // CloudFront URL; returning the ALB URL directly would cause the CLI to
+    // call it over HTTP.
+    // 'private': the operator's own domain name for the PrivateLink
+    // publication — the single private URL returned in the config.
+    STRATOCLAVE_API_ENDPOINT:
+      entryConfig.mode === 'private'
+        ? `https://${entryConfig.privateEntry.domainName}`
+        : `https://${frontendStack!.cfnDistribution.attrDomainName}`,
 
     // Feature flags (MVP)
     VERIFIED_PERMISSIONS_ENABLED: 'false',
@@ -663,7 +769,9 @@ ecsStack.addDependency(ecrStack);
 ecsStack.addDependency(albStack);
 ecsStack.addDependency(dynamoDBStack);
 ecsStack.addDependency(cognitoStack);
-ecsStack.addDependency(frontendStack);
+if (frontendStack) {
+  ecsStack.addDependency(frontendStack);
+}
 
 // Surface residency warnings as CDK Annotations (not just console.warn) so they
 // appear in `cdk synth`/`cdk diff` and can be escalated via aspects. Attached to
@@ -1008,10 +1116,37 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   NagSuppressions.addStackSuppressions(albStack, appLevelSuppressions);
   NagSuppressions.addStackSuppressions(ecsStack, appLevelSuppressions);
   NagSuppressions.addStackSuppressions(dynamoDBStack, appLevelSuppressions);
-  NagSuppressions.addStackSuppressions(frontendStack, appLevelSuppressions);
+  if (frontendStack) {
+    NagSuppressions.addStackSuppressions(frontendStack, appLevelSuppressions);
+  }
   NagSuppressions.addStackSuppressions(cognitoStack, appLevelSuppressions);
   if (wafStack) {
     NagSuppressions.addStackSuppressions(wafStack, appLevelSuppressions);
+  }
+  // privateLinkStack: no blanket NagSuppressions.addStackSuppressions call.
+  // Verified against a real `cdk synth` with cdk-nag ON
+  // (STRATOCLAVE_ENTRY=private) that exactly ONE finding fires on this
+  // stack's resources — AwsSolutions-ELB2 on the NLB — suppressed below, at
+  // the resource, with its own rationale (the same one the ALB's own ELB2
+  // suppression in `appLevelSuppressions` already gives, minus the
+  // CloudFront-logs half that does not apply here). Every other
+  // `appLevelSuppressions` entry is a `cloudfront`-mode tradeoff
+  // (CloudFront/WAF/Cognito-advanced-security/ECS/Secrets-rotation/etc.)
+  // that does not even apply to this stack's resource types, so
+  // blanket-copying the whole list would be suppressing findings that were
+  // never going to fire while still not being the source of truth for the
+  // one that does. `test/nag-synth.test.ts`'s private-mode case pins this —
+  // a future change to lib/private-link-stack.ts that trips a DIFFERENT
+  // finding fails that test, and the new suppression belongs here with its
+  // own rationale.
+  if (privateLinkStack) {
+    NagSuppressions.addResourceSuppressions(privateLinkStack.nlb, [
+      {
+        id: 'AwsSolutions-ELB2',
+        reason:
+          'NLB access logs are not enabled. This load balancer is internal (no internet-facing traffic to log separately) and VPC Flow Logs (network-stack.ts, same VPC) already give request-level forensics; there is no CloudFront edge in this entry mode to double up with either.',
+      },
+    ]);
   }
   if (ledgerProjectorStack) {
     NagSuppressions.addStackSuppressions(ledgerProjectorStack, appLevelSuppressions);
