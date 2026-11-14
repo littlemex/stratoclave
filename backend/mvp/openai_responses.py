@@ -904,7 +904,8 @@ async def _stream_response(
     tenants_repo: UserTenantsRepository,
     reservation: int,
     request_id: Optional[str] = None,
-    task_tag: Optional[str] = None,
+    *,
+    task_tag: Optional[str],
     sctx=None,
     payload: Optional[dict] = None,
 ) -> AsyncGenerator[bytes, None]:

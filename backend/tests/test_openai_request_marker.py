@@ -89,6 +89,7 @@ def _call_chat_completion(body, *, org_id="org-chat-1", hold_id=REAL_HOLD_ID):
          patch("mvp.chat_completions._settle_reservation_and_log"), \
          patch("mvp.chat_completions._release_pool"):
         _openai_chat_completion(
+            task_tag=None,
             body=body, entry=_entry(), user=_user(org_id), tenants_repo=tenants_repo,
             reservation=1024, corr={}, request_id="req-1",
         )
@@ -232,6 +233,7 @@ def test_chat_completions_streaming_also_carries_the_real_hold_id():
          patch("mvp.chat_completions._settle_reservation_and_log"), \
          patch("mvp.chat_completions._release_pool"):
         out = _openai_chat_completion(
+            task_tag=None,
             body=_body(stream=True), entry=_entry(), user=_user("org-chat-stream"),
             tenants_repo=tenants_repo, reservation=1024, corr={}, request_id="req-1",
         )

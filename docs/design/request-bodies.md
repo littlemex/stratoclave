@@ -83,7 +83,7 @@ each transport (C13.6). Bedrock echoes it into the invocation log.
 | Marker key | What it is | When it is absent |
 |---|---|---|
 | `sc_tenant` | the tenant id | when the value does not pass the value rule below; in the case below where the whole marker is dropped |
-| `sc_user` | the principal's `user_id`, the id the console and the usage records use | when the principal has no user id; when the value does not pass the value rule; first, when the OpenAI-compatible key limit below leaves no room for it |
+| `sc_user` | the principal's `user_id`, the id the console and the usage records use | when the principal has no user id; when the value does not pass the value rule; after `sc_task_tag`, when the OpenAI-compatible key limit below leaves no room for it |
 | `sc_attempt_id` | the gateway's id for this attempt's money hold | for a tenant with no dollar pool, which has no hold; in the case below where the whole marker is dropped |
 | `sc_task_tag` | the task tag the caller sent in `x-sc-task-tag`, the same one the usage records group by | when the caller sent none or it was dropped (an untagged request is not sent as `unlabelled`); first of all, when the OpenAI-compatible key limit below leaves no room for it |
 
@@ -92,8 +92,8 @@ a character outside letters, digits, whitespace and `:_@$#=/+,-.`. So each value
 checked before it is sent, against that set with whitespace narrowed to an inner
 space, at most 256 characters, and a value that does not pass is left out, never
 altered. The call goes out with the other parts. The ids the gateway mints
-(`tenant-<uuid>`, a Cognito `sub`, a hold id) and every task tag its grammar accepts
-pass. The default tenant's id is chosen in `DEFAULT_ORG_ID`, so the gateway refuses to
+or receives from Cognito (`tenant-<uuid>`, a Cognito `sub`, a hold id) and every task
+tag its grammar accepts pass. The default tenant's id is chosen in `DEFAULT_ORG_ID`, so the gateway refuses to
 start when that id does not pass.
 
 | Transport | Where the marker goes |
@@ -110,9 +110,10 @@ gets the request sent without the gateway's marker entirely rather than refused;
 record carries none of the keys.
 
 So a logged record is attributable to a tenant, a user and a task by key when the key
-is present, and `sc_user` and `sc_task_tag` join it to the usage records and the console's user list directly. The marker is
-values the gateway already holds; it carries no email and nothing from the request's
-content.
+is present: `sc_user` joins it to the usage records and the console's user list,
+and `sc_task_tag` to the usage records' task grouping. The marker is values the
+gateway already holds and the caller's task tag; it carries no email and nothing from
+the request body.
 
 **What this means for whoever can read the logs.** With logging on, anyone who can
 read the destination can see, per user id, which model was called when and with how

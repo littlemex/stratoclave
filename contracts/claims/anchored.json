@@ -2214,8 +2214,8 @@
    "anchor": "contract:C13.6@373d5684"
   },
   {
-   "id": "cl-f8561eb19a97",
-   "claim": "The ids the gateway mints (`tenant-<uuid>`, a Cognito `sub`, a hold id) and every task tag its grammar accepts pass.",
+   "id": "cl-df2735c52ec6",
+   "claim": "The ids the gateway mints or receives from Cognito (`tenant-<uuid>`, a Cognito `sub`, a hold id) and every task tag its grammar accepts pass.",
    "anchor": "contract:C13.6@373d5684"
   }
  ]

@@ -371,8 +371,9 @@ def require_marker_safe_default_tenant(tenant_id: str) -> None:
     if not marker_value_ok(tenant_id):
         raise RuntimeError(
             "DEFAULT_ORG_ID must be 1 to 256 characters of letters, digits and "
-            "':_@$#=/+,.-' (inner spaces allowed): it is sent to Bedrock as the "
-            "correlation marker's sc_tenant, which refuses anything else.")
+            "':_@$#=/+,.-' (inner spaces allowed): the gateway sends it as the "
+            "correlation marker's sc_tenant and as a header, and leaves out any "
+            "value outside that rule.")
 
 
 # Keys already reported as dropped by `attempt_request_metadata`, so a tenant
@@ -591,7 +592,8 @@ def merge_openai_metadata(
 #: fit under the OpenAI-compatible key ceiling. What is left is the attempt and
 #: tenant pair, which fitted before either existed and is the part
 #: reconciliation needs; the pair itself is all or nothing. The task tag goes
-#: first because the caller chose it and can put it in its own `metadata`; the
+#: first because the caller chose it and can put it in its own `metadata` under
+#: a key of its own; the
 #: user id is the gateway's own attestation.
 MARKER_GIVES_WAY: tuple[str, ...] = ("sc_task_tag", "sc_user")
 

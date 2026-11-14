@@ -46,10 +46,10 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   `X-Stratoclave-User`, `X-Stratoclave-Attempt-Id` and `X-Stratoclave-Task-Tag`, which its
   operator can write to an access log. On the OpenAI-compatible surface `sc_user` and
   `sc_task_tag` are now reserved `metadata` keys: a value a caller sends under one is
-  replaced. When a caller's own keys leave no room for the full marker under Bedrock's
+  removed, and replaced when the gateway has its own value. When a caller's own keys leave no room for the full marker under Bedrock's
   16-key limit, `sc_task_tag` and then `sc_user` are left out and the attempt and tenant pair
   is still sent, as before; a caller with 15 or more keys gets no marker, as before. The
-  gateway refuses to start when `DEFAULT_ORG_ID` holds a character the marker cannot carry.
+  gateway refuses to start when `DEFAULT_ORG_ID` does not pass the marker value rule.
 
 - **Where request and response bodies are held, written down and checked (C12.7, issue #237).**
   `docs/design/request-bodies.md` lists the records the gateway writes to its tables and audit

@@ -1033,7 +1033,7 @@ def _openai_chat_completion(
     payload: Optional[dict] = None,
     injected_usage: Optional[bool] = None,
     request_id: Optional[str] = None,
-    task_tag: Optional[str] = None,
+    task_tag: Optional[str],
     timing: Optional[RequestTiming] = None,
 ):
     """Forward an OpenAI Chat Completions request to the OpenAI-compatible endpoint unchanged.
@@ -1318,7 +1318,7 @@ async def _stream_chat(
     *,
     entry: Any,
     request_id: Optional[str] = None,
-    task_tag: Optional[str] = None,
+    task_tag: Optional[str],
     timing: Optional[RequestTiming] = None,
 ) -> AsyncGenerator[bytes, None]:
     """SSE stream via the shared _budget_flow.run_stream + ChatAdapter.

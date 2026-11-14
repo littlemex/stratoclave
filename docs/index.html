@@ -607,7 +607,7 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
     <div class="sec-head rv" id="logs" style="margin-top:56px">
       <div class="eyebrow" data-t="lg.eyebrow">Traceable in your own logs</div>
       <h2 data-t="lg.h">The same tag, and the user, land in Bedrock's invocation log and in your own endpoint's.</h2>
-      <p class="lede" data-t="lg.lede">Every model call carries a small marker: the tenant, the user, the attempt and the task tag. Bedrock writes it into its model invocation log; a self-hosted endpoint receives it as request headers. So a log record answers who called, for which task, and which charge it was, without the gateway keeping a copy of anything.</p>
+      <p class="lede" data-t="lg.lede">Model calls carry a small marker: the tenant, the user, the attempt and, when you sent one, the task tag. Bedrock writes it into its model invocation log; a self-hosted endpoint receives it as request headers. So a log record answers who called, for which task, and which charge it was, without the gateway keeping a copy of the request or of the log.</p>
     </div>
 
     <div class="tagflow logflow rv">
@@ -616,6 +616,7 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
         <h3 data-t="lg.s1">The same request</h3>
         <div class="codewrap"><pre class="term wrap">curl $STRATOCLAVE_URL/v1/messages \
   -H "x-api-key: $STRATOCLAVE_API_KEY" \
+  -H "content-type: application/json" \
   -H "x-sc-task-tag: nightly-eval" \
   -d @request.json</pre></div>
         <p class="muted" data-t="lg.s1p">Nothing new to send. The user comes from the key, the tag from the header you already use.</p>
@@ -624,7 +625,7 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
         <div class="tf-n">2</div>
         <h3 data-t="lg.s2">Bedrock's invocation log record</h3>
         <div class="codewrap"><pre class="term" translate="no">{
-  "operation": "ConverseStream",
+  "operation": "Converse",
   "modelId": "us.anthropic.claude-haiku-4-5",
   "requestMetadata": {
     "sc_tenant": "tenant-7f3c...",
@@ -635,7 +636,7 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
   "input": { "inputTokenCount": 9 },
   "output": { "outputTokenCount": 4 }
 }</pre></div>
-        <p class="muted" data-t="lg.s2p">Streaming or not, Converse or the OpenAI-compatible surface. Query it by user or by task in CloudWatch Logs Insights or Athena, and join it to the usage rows on the same ids.</p>
+        <p class="muted" data-t="lg.s2p">Streaming or not, Converse or the OpenAI-compatible surface (where the marker rides in <code>metadata</code>). Query it by user or by task in CloudWatch Logs Insights or Athena, and join it to the usage rows on the same ids.</p>
       </div>
       <div class="tf-step">
         <div class="tf-n">3</div>
@@ -649,10 +650,10 @@ X-Stratoclave-Attempt-Id: e339...</pre></div>
     </div>
 
     <div class="chips rv" style="margin-top:28px">
-      <div class="chip"><b data-t="lg.c1">Ids only</b><span data-t="lg.c1p">The marker holds ids the gateway already has. No prompt, no email, nothing from the request body.</span></div>
-      <div class="chip"><b data-t="lg.c2">Cannot be forged</b><span data-t="lg.c2p">A caller's own <code>sc_*</code> metadata is removed and replaced, so a record names the real tenant and user.</span></div>
-      <div class="chip"><b data-t="lg.c3">Never model input</b><span data-t="lg.c3p">It travels beside the prompt, not in it: the model never sees it and it costs no tokens.</span></div>
-      <div class="chip"><b data-t="lg.c4">The gateway keeps no log</b><span data-t="lg.c4p">Logs stay in your account, under your IAM. Grant read access to them as you would to per-user usage data.</span></div>
+      <div class="chip"><b data-t="lg.c1">Ids only</b><span data-t="lg.c1p">The marker holds ids the gateway already has, plus the task tag from your header. No prompt, no email, nothing from the request body.</span></div>
+      <div class="chip"><b data-t="lg.c2">The tenant and user cannot be faked</b><span data-t="lg.c2p">A caller's own <code>sc_tenant</code>, <code>sc_user</code>, <code>sc_attempt_id</code> or <code>sc_task_tag</code> metadata is removed and the gateway writes its own, so a record never names a tenant or user the caller made up. The task tag stays the caller's own label.</span></div>
+      <div class="chip"><b data-t="lg.c3">Never model input</b><span data-t="lg.c3p">It travels beside the prompt, not in it: the model never sees it and it is not billed as tokens.</span></div>
+      <div class="chip"><b data-t="lg.c4">The gateway keeps no invocation log</b><span data-t="lg.c4p">Logs stay in your account, under your IAM. Grant read access to them as you would to per-user usage data.</span></div>
     </div>
   </div>
 </section>
@@ -1283,20 +1284,20 @@ Object.assign(window.__JA, {
 
 'lg.eyebrow': '自分のログで追える',
 'lg.h': '同じタグと利用者が、Bedrock の呼び出しログにも、自前のエンドポイントのログにも残る。',
-'lg.lede': 'モデルを呼び出すたびに、テナント、利用者、試行、タスクのタグを示す小さな目印を付けます。Bedrock はこれを model invocation logging の記録に書き込み、セルフホストのエンドポイントにはリクエストヘッダーとして届きます。ゲートウェイが何も控えを持たなくても、ログの 1 件から「誰が、どの作業で、どの課金の呼び出しか」がわかります。',
+'lg.lede': 'モデルの呼び出しには、テナント、利用者、試行、そして送られていればタスクのタグを示す小さな目印を付けます。Bedrock はこれを model invocation logging の記録に書き込み、セルフホストのエンドポイントにはリクエストヘッダーとして届きます。ゲートウェイがリクエストやログの控えを持たなくても、ログの 1 件から「誰が、どの作業で、どの課金の呼び出しか」がわかります。',
 'lg.s1': 'リクエストはそのまま',
 'lg.s1p': '新しく送るものはありません。利用者はキーから、タグはいつものヘッダーから取ります。',
 'lg.s2': 'Bedrock の呼び出しログの記録',
-'lg.s2p': 'ストリーミングでもそうでなくても、Converse でも OpenAI 互換の窓口でも同じです。CloudWatch Logs Insights や Athena で利用者別、タスク別に引けて、同じ ID で使用量の行とつなげられます。',
+'lg.s2p': 'ストリーミングでもそうでなくても、Converse でも OpenAI 互換の窓口 (目印は <code>metadata</code> に入ります) でも同じです。CloudWatch Logs Insights や Athena で利用者別、タスク別に引けて、同じ ID で使用量の行とつなげられます。',
 'lg.s3': '自前の GPU エンドポイント',
 'lg.s3p': 'ゲートウェイはこのヘッダーを送るだけで、アクセスログに書くのは手前のリバースプロキシです。何をどれだけ残すかは運用する側が決めます。',
 'lg.c1': '載せるのは ID だけ',
-'lg.c1p': '目印はゲートウェイがもともと持っている ID だけです。プロンプト、メールアドレス、リクエスト本文の中身は入りません。',
-'lg.c2': 'なりすませない',
-'lg.c2p': '呼び出し側が自分で <code>sc_*</code> を metadata に入れても消して置き換えるので、記録には本当のテナントと利用者が残ります。',
+'lg.c1p': '目印はゲートウェイがもともと持っている ID と、ヘッダーで送られたタスクのタグだけです。プロンプト、メールアドレス、リクエスト本文の中身は入りません。',
+'lg.c2': 'テナントと利用者は偽れない',
+'lg.c2p': '呼び出し側が <code>sc_tenant</code>、<code>sc_user</code>、<code>sc_attempt_id</code>、<code>sc_task_tag</code> を metadata に入れても消し、ゲートウェイが自分の値を書くので、呼び出し側がでっち上げたテナントや利用者が記録に残ることはありません。タスクのタグは呼び出し側が付ける名札のままです。',
 'lg.c3': 'モデルには渡らない',
-'lg.c3p': 'プロンプトの横に添えて送り、中には入れません。モデルからは見えず、トークン代もかかりません。',
-'lg.c4': 'ゲートウェイはログを持たない',
+'lg.c3p': 'プロンプトの横に添えて送り、中には入れません。モデルからは見えず、トークンとして課金されることもありません。',
+'lg.c4': 'ゲートウェイは呼び出しログを持たない',
 'lg.c4p': 'ログはあなたのアカウントに、あなたの IAM のもとで残ります。読める人は、利用者ごとの使用量データと同じように絞ってください。',
 
 'ui.eyebrow': 'Web コンソール',
