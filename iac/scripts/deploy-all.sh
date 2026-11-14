@@ -521,26 +521,45 @@ check_cloudfront_origin_migration_guard() {
   # of it, so a switch that is still mid-propagation or a contraction that
   # has not actually deployed cannot be mistaken for one that has.
   local live_switch_deployed="false" live_public_origin_declared="false"
-  if [ "$live_internal_alb_present" = "true" ] && stack_exists "$FRONTEND_STACK"; then
+  # `live_public_origin_declared` must be resolved whenever FrontendStack's
+  # distribution exists at all, NOT only once `live_internal_alb_present` is
+  # true: on a deployment that has never run `vpc-expand` (the exact state a
+  # fresh `cloudfront`/public deployment is in before any migration step),
+  # the live distribution still declares the public `ALBOrigin` -- that is
+  # the fact this guard exists to catch for the `vpc` case below. Gating
+  # this lookup on `live_internal_alb_present` left it at its "false"
+  # default in exactly that state, which `cfo_migration_decision`'s `vpc)`
+  # branch reads as "nothing to refuse" and lets straight through --
+  # confirmed on a real deployment: it ran `deploy_stacks --all` into
+  # AlbStack before CloudFormation's own export-in-use protection stopped
+  # it, after NetworkStack had already removed the public ALB's security
+  # group ingress rule and dropped live traffic for several minutes. Only
+  # `live_switch_deployed` (whether `vpc-switch` has already retargeted the
+  # distribution AND finished propagating) depends on the internal ALB
+  # existing -- `ALBVpcOrigin` cannot be the target before `vpc-expand` has
+  # created it, so that lookup stays conditional.
+  if stack_exists "$FRONTEND_STACK"; then
     local dist_id
     dist_id=$(get_stack_output "$FRONTEND_STACK" "CloudFrontDistributionId")
     if [ -n "$dist_id" ]; then
-      local dist_status target_origin_id
-      dist_status=$(aws_lookup_or_empty "looking up CloudFront distribution '$dist_id' status" \
-        aws cloudfront get-distribution --id "$dist_id" \
-        --query 'Distribution.Status' --output text)
-      target_origin_id=$(aws_lookup_or_empty "looking up CloudFront distribution '$dist_id' behaviours" \
-        aws cloudfront get-distribution-config --id "$dist_id" \
-        --query 'DistributionConfig.CacheBehaviors.Items[0].TargetOriginId' --output text)
-      if [ "$dist_status" = "Deployed" ] && [ "$target_origin_id" = "ALBVpcOrigin" ]; then
-        live_switch_deployed="true"
-      fi
       local public_origin_count
       public_origin_count=$(aws_lookup_or_empty "looking up CloudFront distribution '$dist_id' origins" \
         aws cloudfront get-distribution-config --id "$dist_id" \
         --query "length(DistributionConfig.Origins.Items[?Id=='ALBOrigin'])" --output text)
       if [ "$public_origin_count" != "0" ] && [ -n "$public_origin_count" ]; then
         live_public_origin_declared="true"
+      fi
+      if [ "$live_internal_alb_present" = "true" ]; then
+        local dist_status target_origin_id
+        dist_status=$(aws_lookup_or_empty "looking up CloudFront distribution '$dist_id' status" \
+          aws cloudfront get-distribution --id "$dist_id" \
+          --query 'Distribution.Status' --output text)
+        target_origin_id=$(aws_lookup_or_empty "looking up CloudFront distribution '$dist_id' behaviours" \
+          aws cloudfront get-distribution-config --id "$dist_id" \
+          --query 'DistributionConfig.CacheBehaviors.Items[0].TargetOriginId' --output text)
+        if [ "$dist_status" = "Deployed" ] && [ "$target_origin_id" = "ALBVpcOrigin" ]; then
+          live_switch_deployed="true"
+        fi
       fi
     fi
   fi
