@@ -20,6 +20,17 @@ def _key(request: Request) -> str:
     return request.headers.get("x-test-ip", "1.2.3.4")
 
 
+@pytest.fixture(autouse=True)
+def _one_window(monkeypatch):
+    """Hold the limiter's clock inside one window. The counts these tests assert hold within a window, and on the
+    wall clock a run that crosses a minute boundary between two hits (a loaded machine is enough) starts a fresh
+    window and lets the over-limit hit through."""
+    import types
+
+    import core.rate_limit_ddb as rl
+    monkeypatch.setattr(rl, "time", types.SimpleNamespace(time=lambda: 1_800_000_030.0))
+
+
 class TestParseSpec:
     def test_minute(self):
         assert _parse_spec("10/minute") == (10, 60)
