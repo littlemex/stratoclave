@@ -418,18 +418,13 @@ export BEDROCK_PRIMARY_REGION=us-east-1
 export DEFAULT_BEDROCK_MODEL=us.anthropic.claude-opus-4-7
 ```
 
-`DEFAULT_BEDROCK_MODEL` must be set explicitly under a boundary — the built-in
-default (a `us.` profile) is refused whenever it is not reachable from
-`BEDROCK_PRIMARY_REGION` — and a `global.` profile is always refused under a
-boundary, because it is exactly the ARN shape the boundary's `Deny` statement
-(below) blocks. For a geo-prefixed id (`us.` / `eu.` / `apac.` / `jp.` / `au.`
-/ `ca.`), the IaC check only rules out a prefix whose geography cannot
-possibly include `BEDROCK_PRIMARY_REGION` (for example `us.` with a Japan
-primary); passing that check is not a guarantee the model is actually
-available there — verify with
-`aws bedrock list-foundation-models --region <primary>` as above. A
-directly-hosted (non-geo-prefixed) model id carries no such claim and is
-always accepted.
+`DEFAULT_BEDROCK_MODEL` must be set explicitly under a boundary. At synth it is
+looked up in the bundled model registry (or the file `STRATOCLAVE_MODEL_REGISTRY_PATH`
+names): its recorded destination regions must lie inside the boundary, not be
+"any region" (a `global.` profile), and have been recorded for calls from
+`BEDROCK_PRIMARY_REGION`. An id the file does not contain is accepted with a
+warning, because it may be a model activated from the console; the gateway checks
+it again at startup and refuses to start if it cannot be served.
 
 What is enforced, and where:
 
