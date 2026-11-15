@@ -7,25 +7,12 @@
 # established the stub-`aws`-on-PATH / sed-extraction pattern this file
 # reuses) — neither exercised THIS wrapper's own AWS-querying logic at all.
 #
-# Confirmed on a real deployment (scco, us-east-1, 2026-11-14): with
-# STRATOCLAVE_CLOUDFRONT_ORIGIN unset (default "vpc") against a live,
-# never-migrated, internet-facing deployment, the wrapper let `deploy-all.sh`
-# run `deploy_stacks --all` straight into mutating NetworkStack and AlbStack
-# -- removing the public ALB's security-group ingress rule and dropping
-# live CloudFront->ALB traffic for several minutes -- before CloudFormation's
-# own export-in-use protection stopped AlbStack's update. The guard was
-# supposed to refuse this before any AWS mutation at all.
-#
-# Root cause: `live_public_origin_declared` (whether the live CloudFront
-# distribution still declares the public `ALBOrigin`) was computed only
-# inside `if [ "$live_internal_alb_present" = "true" ] && ...` -- so on a
-# deployment that has never run `vpc-expand` (no internal ALB exists yet;
-# exactly the live scco state), it stayed at its "false" default even
-# though the distribution plainly still declared `ALBOrigin`.
-# `cfo_migration_decision`'s `vpc)` branch reads that "false" as "nothing to
-# refuse" and allows straight through. The fix resolves
-# `live_public_origin_declared` whenever FrontendStack's distribution
-# exists, independent of whether the internal ALB exists yet.
+# The case that matters most: a live, never-migrated, internet-facing
+# deployment (no internal ALB yet, the distribution still declaring the public
+# ALBOrigin) with STRATOCLAVE_CLOUDFRONT_ORIGIN unset (default "vpc") must be
+# refused before any stack is touched. The decision function alone cannot see
+# this; the wrapper has to read the live distribution even when no internal
+# ALB exists.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,7 +51,7 @@ assert_eq() {
 }
 
 PATH="$STUB_DIR:$PATH"
-PREFIX="scco"
+PREFIX="example"
 REGION="us-east-1"
 ENTRY="cloudfront"
 ALB_STACK="${PREFIX}-alb"
@@ -110,7 +97,7 @@ run_guard() {
 
 echo "=== regression: never-migrated live deployment (no vpc-expand run yet), origin=vpc ==="
 # live_internal_alb_present=false, distribution still declares ALBOrigin.
-# This is scco's exact state when the live outage happened. Must refuse.
+# A never-migrated, internet-facing deployment. Must refuse.
 write_stub_scenario "" "1"
 RC="$(run_guard vpc)"
 assert_eq "origin=vpc refused before a never-migrated deployment's public ALB is touched" "1" "$RC"

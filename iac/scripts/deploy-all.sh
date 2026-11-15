@@ -523,21 +523,11 @@ check_cloudfront_origin_migration_guard() {
   local live_switch_deployed="false" live_public_origin_declared="false"
   # `live_public_origin_declared` must be resolved whenever FrontendStack's
   # distribution exists at all, NOT only once `live_internal_alb_present` is
-  # true: on a deployment that has never run `vpc-expand` (the exact state a
-  # fresh `cloudfront`/public deployment is in before any migration step),
-  # the live distribution still declares the public `ALBOrigin` -- that is
-  # the fact this guard exists to catch for the `vpc` case below. Gating
-  # this lookup on `live_internal_alb_present` left it at its "false"
-  # default in exactly that state, which `cfo_migration_decision`'s `vpc)`
-  # branch reads as "nothing to refuse" and lets straight through --
-  # confirmed on a real deployment: it ran `deploy_stacks --all` into
-  # AlbStack before CloudFormation's own export-in-use protection stopped
-  # it, after NetworkStack had already removed the public ALB's security
-  # group ingress rule and dropped live traffic for several minutes. Only
-  # `live_switch_deployed` (whether `vpc-switch` has already retargeted the
-  # distribution AND finished propagating) depends on the internal ALB
-  # existing -- `ALBVpcOrigin` cannot be the target before `vpc-expand` has
-  # created it, so that lookup stays conditional.
+  # Resolved whenever the distribution exists: a deployment that has never run
+  # `vpc-expand` has no internal ALB yet, but its distribution still declares
+  # the public ALBOrigin, and the `vpc` case must refuse exactly that state.
+  # Only `live_switch_deployed` depends on the internal ALB existing, because
+  # ALBVpcOrigin cannot be the target before `vpc-expand` has created it.
   if stack_exists "$FRONTEND_STACK"; then
     local dist_id
     dist_id=$(get_stack_output "$FRONTEND_STACK" "CloudFrontDistributionId")

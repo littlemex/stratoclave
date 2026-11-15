@@ -1,7 +1,7 @@
 """`GET /api/mvp/admin/usage-logs` must refuse an unfiltered request with 400
 rather than attempt a DynamoDB Scan.
 
-Real-machine finding (CloudFront test deployment `scco`, 2026-11-14): the ECS
+The ECS
 task role is granted dynamodb:Scan on a fixed allowlist of admin-console
 tables (`iac/lib/ecs-stack.ts`'s `ScanLimitedToAdminConsoleTables`, P0-10
 security review) that deliberately excludes `usage-logs` — it is one of the
