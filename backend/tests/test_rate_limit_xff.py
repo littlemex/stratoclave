@@ -36,12 +36,16 @@ import pytest
 from fastapi import Request
 
 from types import SimpleNamespace
+
+from starlette.datastructures import Headers
 from typing import Mapping
 
 
 def _request(headers: Mapping[str, str], client_host: str = "10.0.0.1"):
+    # The real request's header type, so getlist() and case-insensitive
+    # lookups behave as they do in production.
     return SimpleNamespace(
-        headers={k.lower(): v for k, v in headers.items()},
+        headers=Headers(headers=dict(headers)),
         client=SimpleNamespace(host=client_host),
     )
 
@@ -154,6 +158,111 @@ class TestOperatorOverrides:
             )
             == "203.0.113.7"
         )
+
+
+class TestBothModeSharedAlb:
+    """``STRATOCLAVE_ENTRY=both`` (iac/bin/iac.ts): CloudFront (VPC origin,
+    ALB :80) and PrivateLink (NLB, ALB :443) share one ALB. On the :443 leg,
+    any ``X-Forwarded-For`` present was NOT written by a hop this
+    deployment's topology trusts — it is attacker/caller-supplied, same as
+    ``RATE_LIMIT_TRUSTED_HOPS=0``. ``X-Forwarded-Port`` classification is
+    gated on ``STRATOCLAVE_BOTH_CLOUDFRONT_PORT`` (``bin/iac.ts`` sets it
+    only under ``STRATOCLAVE_ENTRY=both`` — see ``core/forwarded_port.py``):
+    every test below that exercises the POSITIVE-match classification sets
+    it explicitly, because `core.forwarded_port.is_cloudfront_leg` degrades
+    to "treat every request as the CloudFront leg" when it is unset — the
+    behaviour every OTHER entry mode (which never sets this variable) must
+    keep unchanged. ``test_cloudfront_leg_on_the_shared_alb_is_unaffected``
+    below is the one test in this class that deliberately does NOT set it,
+    because its whole point is to pin that exact degrade behaviour.
+    """
+
+    def _reload_with_both_mode_port(self, monkeypatch, env_hops: str | None = None):
+        monkeypatch.setenv("STRATOCLAVE_BOTH_CLOUDFRONT_PORT", "80")
+        return _reload_with(env_hops, monkeypatch)
+
+    def test_privatelink_leg_ignores_forged_xff_and_falls_back_to_peer(
+        self, monkeypatch
+    ):
+        rl = self._reload_with_both_mode_port(monkeypatch)  # default hops=1
+        key = rl._client_key(
+            _request(
+                {
+                    "x-forwarded-for": "8.8.8.8, 198.51.100.5",
+                    "x-forwarded-port": "443",
+                },
+                client_host="10.0.3.9",
+            )
+        )
+        # Not the forged leftmost, not the index-from-right pick either —
+        # the whole XFF header is distrusted on this leg and the ALB's own
+        # observed peer is used instead.
+        assert key == "10.0.3.9"
+
+    def test_a_repeated_forwarded_port_is_distrusted_even_if_it_names_the_cloudfront_port(
+        self, monkeypatch
+    ):
+        rl = self._reload_with_both_mode_port(monkeypatch)
+        request = SimpleNamespace(
+            headers=Headers(raw=[
+                (b"x-forwarded-for", b"8.8.8.8, 198.51.100.5"),
+                (b"x-forwarded-port", b"80"),
+                (b"x-forwarded-port", b"80"),
+            ]),
+            client=SimpleNamespace(host="10.0.3.9"),
+        )
+        assert rl._client_key(request) == "10.0.3.9"
+
+    def test_cloudfront_leg_on_the_shared_alb_is_unaffected(self, monkeypatch):
+        """Port 80 (or no X-Forwarded-Port at all, e.g. every other entry
+        mode) is unaffected: this feature changes nothing about the
+        CloudFront leg's own bucketing."""
+        rl = _reload_with(None, monkeypatch)
+        key_port_80 = rl._client_key(
+            _request(
+                {
+                    "x-forwarded-for": "203.0.113.7, 130.176.12.45",
+                    "x-forwarded-port": "80",
+                }
+            )
+        )
+        key_no_port_header = rl._client_key(
+            _request({"x-forwarded-for": "203.0.113.7, 130.176.12.45"})
+        )
+        assert key_port_80 == "203.0.113.7"
+        assert key_no_port_header == "203.0.113.7"
+
+    def test_malformed_forwarded_port_is_distrusted_fail_closed(self, monkeypatch):
+        """Positive match, not a deny-list: a PRESENT X-Forwarded-Port that
+        is neither the CloudFront (80) nor the PrivateLink (443) listener
+        — malformed, a future listener this code does not know about, a
+        duplicated-value artifact — must still be distrusted. A deny-list
+        version of this check (only `== "443"` triggers distrust, anything
+        else falls through to the normal trusting algorithm) would WRONGLY
+        trust the forged XFF below; this is the regression that review
+        found and this test pins against it recurring."""
+        rl = self._reload_with_both_mode_port(monkeypatch)
+        key = rl._client_key(
+            _request(
+                {
+                    "x-forwarded-for": "8.8.8.8, 198.51.100.5",
+                    "x-forwarded-port": "31337",
+                },
+                client_host="10.0.9.1",
+            )
+        )
+        assert key == "10.0.9.1"
+
+    def test_private_only_mode_already_has_no_xff_to_distrust(self, monkeypatch):
+        """Pure STRATOCLAVE_ENTRY=private already strips X-Forwarded-For at
+        the ALB (xff_header_processing.mode=remove), so this feature's new
+        branch is never even reached there — the `if not xff` guard in
+        `_client_key` returns first regardless of X-Forwarded-Port."""
+        rl = _reload_with(None, monkeypatch)
+        key = rl._client_key(
+            _request({"x-forwarded-port": "443"}, client_host="10.0.5.1")
+        )
+        assert key == "10.0.5.1"
 
 
 class TestWhitespaceAndEmptyEntries:

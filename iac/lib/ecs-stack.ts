@@ -24,6 +24,22 @@ export interface EcsStackProps extends cdk.StackProps {
    */
   targetGroup: elbv2.ApplicationTargetGroup;
 
+  /**
+   * A second target group to also register the service with, via a second
+   * `attachToApplicationTargetGroup` call (CDK's documented way to register
+   * one ECS service with more than one ALB target group — it appends to the
+   * service's `LoadBalancers` list rather than replacing it).
+   *
+   * Set by `bin/iac.ts` to `lib/alb-stack.ts`'s `additionalTargetGroup`
+   * exactly when `STRATOCLAVE_CLOUDFRONT_ORIGIN` is `vpc-expand` or
+   * `vpc-switch` — the two migration states where both the public and the
+   * internal ALB exist and the service must be healthy behind both at once
+   * (see `lib/entry-config.ts`'s `CloudfrontOriginMode` doc). Undefined in
+   * every other mode, so the service registers with exactly one target
+   * group, as it always has.
+   */
+  additionalTargetGroup?: elbv2.ApplicationTargetGroup;
+
   /** Cognito User Pool ARN (used to scope Task Role permissions) */
   userPoolArn: string;
 
@@ -1237,6 +1253,14 @@ export class EcsStack extends cdk.Stack {
     });
 
     this.service.attachToApplicationTargetGroup(props.targetGroup);
+    if (props.additionalTargetGroup) {
+      // Second registration, not a replacement of the first: see this
+      // prop's doc. Both target groups end up in the service's own
+      // `LoadBalancers` list, which is how the service can be healthy
+      // behind the public ALB and the internal ALB at the same time during
+      // a `vpc-expand`/`vpc-switch` migration step.
+      this.service.attachToApplicationTargetGroup(props.additionalTargetGroup);
+    }
 
     // Auto scaling. Floor tracks the desired count so we never scale below
     // the multi-task/multi-AZ baseline; ceiling gives headroom under load.

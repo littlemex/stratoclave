@@ -126,6 +126,103 @@ def test_well_known_does_not_leak_secrets(monkeypatch):
     )
 
 
+def test_well_known_both_mode_selects_by_forwarded_port(monkeypatch):
+    """STRATOCLAVE_ENTRY=both (iac/bin/iac.ts) sets both
+    STRATOCLAVE_API_ENDPOINT (CloudFront) and STRATOCLAVE_API_ENDPOINT_PRIVATE
+    (PrivateLink) on the shared ALB, plus STRATOCLAVE_BOTH_CLOUDFRONT_PORT —
+    the CloudFront listener port `core.forwarded_port.is_cloudfront_leg`
+    positively matches against (set here to mirror
+    `lib/_common.ts`'s `BOTH_MODE_CLOUDFRONT_LISTENER_PORT`). Only a
+    request POSITIVELY identified as the CloudFront leg (`X-Forwarded-Port`
+    carrying exactly one value equal to this port) gets the CloudFront URL;
+    every other case — the confirmed PrivateLink port, AND round-1
+    implementation review's fail-closed default for anything ambiguous,
+    including no header at all — gets the PrivateLink URL instead. This
+    reverses what an earlier version of this test asserted for the
+    no-header case (it used to default to the CloudFront URL): the
+    coordinator's decision was that the safe default when the leg is
+    ambiguous is the PRIVATE url, because a CloudFront client wrongly
+    handed it simply cannot resolve or reach it and fails loudly, which is
+    the safer direction to be wrong in than a PrivateLink client being
+    handed the public CloudFront URL.
+    """
+    client = _make_client(monkeypatch)
+    monkeypatch.setenv("STRATOCLAVE_BOTH_CLOUDFRONT_PORT", "80")
+    monkeypatch.setenv(
+        "STRATOCLAVE_API_ENDPOINT_PRIVATE",
+        "https://stratoclave.internal.example.com",
+    )
+
+    resp_private_leg = client.get(
+        "/.well-known/stratoclave-config", headers={"x-forwarded-port": "443"}
+    )
+    assert (
+        resp_private_leg.json()["api_endpoint"]
+        == "https://stratoclave.internal.example.com"
+    )
+
+    resp_cloudfront_leg = client.get(
+        "/.well-known/stratoclave-config", headers={"x-forwarded-port": "80"}
+    )
+    assert (
+        resp_cloudfront_leg.json()["api_endpoint"]
+        == "https://example-deployment.cloudfront.net"
+    )
+
+    # No header at all is AMBIGUOUS, not "clearly CloudFront" — the safe
+    # default is the PrivateLink URL (see the docstring above).
+    resp_no_port_header = client.get("/.well-known/stratoclave-config")
+    assert (
+        resp_no_port_header.json()["api_endpoint"]
+        == "https://stratoclave.internal.example.com"
+    )
+
+    # A malformed/unrecognised port value is likewise ambiguous, not
+    # positively CloudFront.
+    resp_malformed_port = client.get(
+        "/.well-known/stratoclave-config", headers={"x-forwarded-port": "31337"}
+    )
+    assert (
+        resp_malformed_port.json()["api_endpoint"]
+        == "https://stratoclave.internal.example.com"
+    )
+
+
+def test_well_known_both_mode_with_no_configured_cloudfront_port_keeps_old_images_cloudfront_default(
+    monkeypatch,
+):
+    """`STRATOCLAVE_BOTH_CLOUDFRONT_PORT` is unset on every entry mode but
+    `both` (`bin/iac.ts`) — and, within `both`, on a backend image old
+    enough to predate it. `core.forwarded_port.is_cloudfront_leg` degrades
+    to "every request is the CloudFront leg" in that case, which is the
+    exact behaviour `STRATOCLAVE_API_ENDPOINT_PRIVATE`-unset deployments
+    already relied on before this feature existed — pinned here with
+    `STRATOCLAVE_API_ENDPOINT_PRIVATE` SET, to isolate this one variable's
+    effect from that unset-private-endpoint case
+    (`test_well_known_single_endpoint_mode_ignores_forwarded_port` below)."""
+    client = _make_client(monkeypatch)
+    monkeypatch.delenv("STRATOCLAVE_BOTH_CLOUDFRONT_PORT", raising=False)
+    monkeypatch.setenv(
+        "STRATOCLAVE_API_ENDPOINT_PRIVATE",
+        "https://stratoclave.internal.example.com",
+    )
+    resp = client.get(
+        "/.well-known/stratoclave-config", headers={"x-forwarded-port": "443"}
+    )
+    assert resp.json()["api_endpoint"] == "https://example-deployment.cloudfront.net"
+
+
+def test_well_known_single_endpoint_mode_ignores_forwarded_port(monkeypatch):
+    """Outside STRATOCLAVE_ENTRY=both, STRATOCLAVE_API_ENDPOINT_PRIVATE is
+    unset, so the port-based selector never engages — same behaviour as
+    before this feature, regardless of what X-Forwarded-Port says."""
+    client = _make_client(monkeypatch)
+    resp = client.get(
+        "/.well-known/stratoclave-config", headers={"x-forwarded-port": "443"}
+    )
+    assert resp.json()["api_endpoint"] == "https://example-deployment.cloudfront.net"
+
+
 def test_well_known_returns_503_when_misconfigured(monkeypatch):
     """If a required env var is missing the endpoint must fail closed
     with 503, not silently return partial data.

@@ -12,9 +12,16 @@ import {
   paramPath,
   positiveIntFromEnv,
   putStringParameter,
+  BOTH_MODE_CLOUDFRONT_LISTENER_PORT,
+  BOTH_MODE_CLOUDFRONT_TRUSTED_HOPS,
 } from '../lib/_common';
 import { resolveRegionConfig } from '../lib/region-config';
-import { resolveEntryConfig } from '../lib/entry-config';
+import {
+  resolveEntryConfig,
+  resolveCloudfrontOriginConfig,
+  hasCloudFrontLeg,
+  hasPrivateLinkLeg,
+} from '../lib/entry-config';
 import { NetworkStack } from '../lib/network-stack';
 import { EcrStack } from '../lib/ecr-stack';
 import { AlbStack } from '../lib/alb-stack';
@@ -100,6 +107,19 @@ const inferenceRegions = regionCfg.inferenceRegions;
 // that cares branches on this one value rather than re-reading the env var.
 const entryConfig = resolveEntryConfig(process.env, regionCfg.bodyRegion);
 cdk.Annotations.of(app).addInfo(`[entry] STRATOCLAVE_ENTRY=${entryConfig.mode}`);
+
+// STRATOCLAVE_CLOUDFRONT_ORIGIN: whether, and how far along, the
+// CloudFront-facing ALB has moved off a public address onto a CloudFront VPC
+// origin (see lib/entry-config.ts's CloudfrontOriginMode doc). Resolved
+// once, here, same convention as entryConfig above — every stack below that
+// cares branches on this one value. Always 'vpc' in practice under
+// STRATOCLAVE_ENTRY=both (resolveCloudfrontOriginConfig refuses any other
+// value for that mode) and always 'public' under STRATOCLAVE_ENTRY=private
+// (same function refuses any other value there too).
+const cloudfrontOriginMode = resolveCloudfrontOriginConfig(process.env, entryConfig.mode);
+cdk.Annotations.of(app).addInfo(
+  `[cloudfront-origin] STRATOCLAVE_CLOUDFRONT_ORIGIN=${cloudfrontOriginMode}`,
+);
 
 // Deprecated bare env-var names (e.g. CODEX_ENABLED -> STRATOCLAVE_CODEX_ENABLED)
 // used as a fallback this synth. Surfaced immediately as CDK Annotations on the
@@ -251,6 +271,7 @@ const networkStack = new NetworkStack(app, stackName(prefix, 'network'), {
   env,
   prefix,
   entryMode: entryConfig.mode,
+  cloudfrontOrigin: cloudfrontOriginMode,
   description: `[${prefix}] VPC + Public Subnets + SGs`,
 });
 
@@ -280,11 +301,19 @@ const albStack = new AlbStack(app, stackName(prefix, 'alb'), {
   prefix,
   vpc: networkStack.vpc,
   securityGroup: networkStack.albSecurityGroup,
+  // Undefined exactly when `networkStack.internalAlbSecurityGroup` is
+  // (`cloudfrontOriginMode === 'public'`): AlbStack's own guard refuses to
+  // build an internal ALB with no internal security group rather than
+  // silently falling back to the public one (the sharing round-1
+  // implementation review flagged).
+  internalSecurityGroup: networkStack.internalAlbSecurityGroup,
   internal: entryConfig.mode === 'private',
   healthCheckPath: '/health',
   targetPort: 8000,
   // Prod: protect against accidental `cdk destroy` tearing the ALB down.
   deletionProtection: isProd,
+  entryMode: entryConfig.mode,
+  cloudfrontOrigin: cloudfrontOriginMode,
   ...(entryConfig.mode === 'private'
     ? {
         certificateArn: entryConfig.privateEntry.certificateArn,
@@ -298,11 +327,39 @@ const albStack = new AlbStack(app, stackName(prefix, 'alb'), {
         // zero diff).
         enableAccessLogs: true,
       }
+    : entryConfig.mode === 'both'
+    ? {
+        // `certificateArn` is attached to the shared INTERNAL ALB's HTTPS
+        // :443 listener in this mode (see lib/alb-stack.ts's `entryMode`
+        // prop doc) — there is no primary/public ALB build for it to
+        // attach to instead.
+        certificateArn: entryConfig.privateEntry.certificateArn,
+        domainName: entryConfig.privateEntry.domainName,
+        // `xffHeaderProcessingMode` is deliberately LEFT UNSET here (AWS
+        // default: `append`): this ALB's :80 leg is CloudFront's VPC
+        // origin, and the unauthenticated-rate-limit path
+        // (backend/core/rate_limit.py) needs the viewer's XFF entry on
+        // that leg. `httpRedirectListener` is also not passed: the
+        // internal ALB's :80 listener is always a plain HTTP forward in
+        // this mode (see lib/alb-stack.ts), never a redirect, regardless
+        // of what this prop would otherwise say.
+        //
+        // Real access logs, same reasoning as `private` above: the
+        // PrivateLink leg (:443) never touches CloudFront, so there is no
+        // edge log covering it. bin/iac.ts's NagSuppressions block below
+        // strips the ELB2 blanket suppression for this stack in this mode
+        // for the same reason.
+        enableAccessLogs: true,
+      }
     : {}),
   description:
     entryConfig.mode === 'private'
       ? `[${prefix}] Internal ALB (PrivateLink only, HTTPS :443 only)`
-      : `[${prefix}] Internet-facing ALB`,
+      : entryConfig.mode === 'both'
+      ? `[${prefix}] Shared internal ALB (CloudFront VPC origin :80 + PrivateLink :443)`
+      : cloudfrontOriginMode === 'public'
+      ? `[${prefix}] Internet-facing ALB`
+      : `[${prefix}] ALB (cloudfrontOrigin=${cloudfrontOriginMode})`,
 });
 albStack.addDependency(networkStack);
 
@@ -320,7 +377,7 @@ albStack.addDependency(networkStack);
 // silently disable WAF (the token-based reference makes that structurally
 // impossible and also enforces deploy ordering).
 let wafStack: WafStack | undefined;
-if (entryConfig.mode === 'cloudfront' && enableWaf) {
+if (hasCloudFrontLeg(entryConfig.mode) && enableWaf) {
   wafStack = new WafStack(
     app,
     // Qualified by the body region: see `pinnedStackName`. Two deployments that
@@ -343,7 +400,7 @@ if (entryConfig.mode === 'cloudfront' && enableWaf) {
 // in 'private' mode: no CloudFront distribution, no S3 console bucket at
 // all — that is the whole point of "headless".
 let frontendStack: FrontendStack | undefined;
-if (entryConfig.mode === 'cloudfront') {
+if (hasCloudFrontLeg(entryConfig.mode)) {
   frontendStack = new FrontendStack(app, stackName(prefix, 'frontend'), {
     env,
     // Consumes the us-east-1 WebACL ARN. crossRegionReferences must match the
@@ -352,7 +409,30 @@ if (entryConfig.mode === 'cloudfront') {
     // resolve when ENABLE_WAF=false.
     crossRegionReferences: enableWaf ? true : undefined,
     prefix,
-    albDnsName: albStack.alb.loadBalancerDnsName,
+    // `albStack.publicAlb`/`albStack.internalAlb` (lib/alb-stack.ts), not
+    // the generic `albStack.alb`/`albStack.targetGroup` "primary" fields:
+    // this stack needs to know exactly which ALB(s) exist for
+    // `cloudfrontOriginMode`, not which one bin/iac.ts's ECS/scaling wiring
+    // elsewhere treats as primary.
+    //
+    // Deliberately NOT `albStack.publicAlb?.loadBalancerDnsName` on its
+    // own: `publicAlb` is STILL DEFINED under `vpc-contract` (AlbStack
+    // keeps declaring the public ALB there — see `lib/entry-config.ts`'s
+    // `CloudfrontOriginMode` doc) even though this stack must stop
+    // IMPORTING its DNS name in that exact step, so a truthiness check on
+    // `publicAlb` alone would reintroduce the cross-stack export the
+    // consumer-first contraction step exists to remove. Gated on the same
+    // three values `lib/frontend-stack.ts`'s own `needsPublicOrigin`
+    // checks, so the two files cannot drift on which modes still pass
+    // `albDnsName` at all.
+    albDnsName:
+      cloudfrontOriginMode === 'public' ||
+      cloudfrontOriginMode === 'vpc-expand' ||
+      cloudfrontOriginMode === 'vpc-switch'
+        ? albStack.publicAlb?.loadBalancerDnsName
+        : undefined,
+    internalAlb: albStack.internalAlb,
+    cloudfrontOrigin: cloudfrontOriginMode,
     webAclArn: wafStack?.webAclArn,
     description: `[${prefix}] Frontend S3 + CloudFront`,
   });
@@ -362,43 +442,86 @@ if (entryConfig.mode === 'cloudfront') {
   }
 }
 
-// The gateway's own entry URL, composed exactly once regardless of mode, and
-// used for every one of its three consumers below (PrivateLinkStack's
-// `privateUrl` prop, and the ECS task env's `CORS_ORIGINS` /
-// `STRATOCLAVE_API_ENDPOINT`) instead of three separate ternary expressions.
-// `frontendStack` is guaranteed defined in the `cloudfront` branch (it is
-// unconditionally constructed above whenever `entryConfig.mode ===
-// 'cloudfront'`); the explicit throw is a synth-time assertion of that
+// The gateway's two possible entry URLs, each composed exactly once
+// regardless of mode. `cloudFrontUrl` exists whenever `frontendStack` does
+// (`cloudfront`/`both`); `privateUrl` exists whenever a PrivateLink leg does
+// (`private`/`both`). `entryMode === 'both'` is the only case both are
+// defined at once.
+let cloudFrontUrl: string | undefined;
+if (frontendStack) {
+  cloudFrontUrl = `https://${frontendStack.cfnDistribution.attrDomainName}`;
+}
+let privateUrl: string | undefined;
+if (entryConfig.mode === 'private' || entryConfig.mode === 'both') {
+  privateUrl = `https://${entryConfig.privateEntry.domainName}`;
+}
+
+// The PRIMARY entry URL — used for `CORS_ORIGINS` (always the CloudFront
+// domain when one exists: the web console is the only origin that ever
+// needs a CORS grant, and PrivateLink's path is headless and same-origin
+// with the API itself regardless of mode) and, in every mode except
+// `both`, also for `STRATOCLAVE_API_ENDPOINT` (which `/.well-known/
+// stratoclave-config` returns verbatim — see backend/mvp/well_known.py).
+// `both` sets `STRATOCLAVE_API_ENDPOINT` to this SAME value too (the
+// CloudFront URL) plus a second, PrivateLink-only
+// `STRATOCLAVE_API_ENDPOINT_PRIVATE` below — the backend selects between
+// the two per-request by which ALB listener accepted the connection
+// (`X-Forwarded-Port`), never by trusting an arbitrary request header's
+// VALUE (see backend/mvp/well_known.py's `_derive_api_endpoint` and
+// docs/DEPLOYMENT.md's "both" section).
+//
+// `frontendStack` is guaranteed defined whenever `entryConfig.mode` is
+// `cloudfront` or `both` (unconditionally constructed above in both
+// branches); the explicit throw is a synth-time assertion of that
 // invariant, not a real expected failure.
 let entryUrl: string;
 if (entryConfig.mode === 'private') {
-  entryUrl = `https://${entryConfig.privateEntry.domainName}`;
+  entryUrl = privateUrl!;
 } else {
-  if (!frontendStack) {
+  if (!cloudFrontUrl) {
     throw new Error(
-      'frontendStack is undefined in cloudfront mode; it is always constructed ' +
-        'above when entryConfig.mode === "cloudfront", so this should never happen.',
+      'frontendStack is undefined in cloudfront/both mode; it is always constructed ' +
+        'above when entryConfig.mode is "cloudfront" or "both", so this should never happen.',
     );
   }
-  entryUrl = `https://${frontendStack.cfnDistribution.attrDomainName}`;
+  entryUrl = cloudFrontUrl;
 }
 
-// --- 5b. Private-entry publication (STRATOCLAVE_ENTRY=private only): an
+// `stsAudiences` (CDK context, resolved near the top of this file) merged
+// with the PrivateLink host `STRATOCLAVE_ENTRY=both` adds — NOT with
+// `cloudFrontUrl`: the backend's own `mvp.sso_sts.expected_audiences()`
+// already includes `core.deployment.api_endpoint()` (== `STRATOCLAVE_API_ENDPOINT`,
+// the CloudFront URL in cloudfront/both mode) unconditionally, so repeating
+// it here would be a second, redundant entry in the same comma-separated
+// list, not a second distinct host. Computed here (after `privateUrl` is
+// known) and read once below, rather than as a second
+// `STRATOCLAVE_STS_AUDIENCES` key spread into the same object literal — a
+// duplicate key the object literal would otherwise silently keep only the
+// LAST of, dropping the context-sourced value entirely.
+const stsAudiencesEffective =
+  entryConfig.mode === 'both' && privateUrl
+    ? [stsAudiences, privateUrl].filter((s) => s.length > 0).join(',')
+    : stsAudiences;
+
+// --- 5b. Private-entry publication (STRATOCLAVE_ENTRY=private or both): an
 // internal NLB + VPC endpoint service fronting the internal ALB above. See
 // lib/private-link-stack.ts for why this shape is the one PrivateLink
 // accepts at all. Placed after the Frontend block so `entryUrl` above is
 // already resolved; in this branch it never depended on `frontendStack`, so
 // the ordering costs nothing.
 let privateLinkStack: PrivateLinkStack | undefined;
-if (entryConfig.mode === 'private') {
+if (entryConfig.mode === 'private' || entryConfig.mode === 'both') {
   // `albStack.httpsListener` is only ever undefined when AlbStack was not
-  // given a certificate; AlbStack above always receives one in this branch,
-  // so the listener exists. A thrown assertion is preferred to a silent
-  // `!`: if this ever stops being true, synth should fail loudly here
-  // rather than produce a broken target group.
+  // given a certificate; AlbStack above always receives one in both
+  // branches this condition covers (attached to the primary ALB under
+  // `private`, to the shared internal ALB under `both` — see
+  // lib/alb-stack.ts's `entryMode` prop doc), so the listener exists
+  // either way. A thrown assertion is preferred to a silent `!`: if this
+  // ever stops being true, synth should fail loudly here rather than
+  // produce a broken target group.
   if (!albStack.httpsListener) {
     throw new Error(
-      'AlbStack.httpsListener is undefined under STRATOCLAVE_ENTRY=private; ' +
+      `AlbStack.httpsListener is undefined under STRATOCLAVE_ENTRY=${entryConfig.mode}; ` +
         'AlbStack should always create it when given a certificateArn.',
     );
   }
@@ -407,8 +530,8 @@ if (entryConfig.mode === 'private') {
   // `entryConfig.mode` as this branch's condition, so it exists here too.
   if (!networkStack.nlbSecurityGroup) {
     throw new Error(
-      'networkStack.nlbSecurityGroup is undefined under STRATOCLAVE_ENTRY=private; ' +
-        'NetworkStack should always create it when entryMode is "private".',
+      `networkStack.nlbSecurityGroup is undefined under STRATOCLAVE_ENTRY=${entryConfig.mode}; ` +
+        'NetworkStack should always create it when entryMode is "private" or "both".',
     );
   }
   privateLinkStack = new PrivateLinkStack(app, stackName(prefix, 'private-link'), {
@@ -417,7 +540,7 @@ if (entryConfig.mode === 'private') {
     vpc: networkStack.vpc,
     nlbSecurityGroup: networkStack.nlbSecurityGroup,
     albHttpsListener: albStack.httpsListener,
-    privateUrl: entryUrl,
+    privateUrl: privateUrl!,
     allowedPrincipals: entryConfig.privateEntry.allowedPrincipals,
     // Parity with AlbStack's own deletionProtection prop, both driven by isProd.
     deletionProtection: isProd,
@@ -516,6 +639,11 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   securityGroup: networkStack.ecsSecurityGroup,
   repository: ecrStack.repository,
   targetGroup: albStack.targetGroup,
+  // Only ever defined during a `vpc-expand`/`vpc-switch` migration step,
+  // when both the public and the internal ALB exist at once — see
+  // lib/alb-stack.ts's `additionalTargetGroup` doc and lib/ecs-stack.ts's
+  // prop of the same name.
+  additionalTargetGroup: albStack.additionalTargetGroup,
   userPoolArn: cognitoStack.userPool.userPoolArn,
   dynamoDbTableArns: dynamoDBStack.allTableArns,
   // Hard allowlist of regions Bedrock inference may run in
@@ -706,14 +834,60 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
 
     // Public API endpoint. This is the value returned as api_endpoint in
     // /.well-known/stratoclave-config (see backend/mvp/well_known.py's own
-    // resolution order comment — this env var always wins there, in both
-    // modes, so no change was needed in that file at all).
+    // resolution order comment — this env var always wins there via
+    // `core.deployment.api_endpoint()`).
     // 'cloudfront': the CloudFront HTTPS URL — unchanged. Always return the
     // CloudFront URL; returning the ALB URL directly would cause the CLI to
     // call it over HTTP.
     // 'private': the operator's own domain name for the PrivateLink
     // publication — the single private URL returned in the config.
+    // 'both': the CloudFront URL (same value `entryUrl` resolves to for
+    // plain `cloudfront`) — returned only when the request is POSITIVELY
+    // identified as the CloudFront leg; the PrivateLink URL for this mode
+    // (`STRATOCLAVE_API_ENDPOINT_PRIVATE` below) is the safe default
+    // otherwise. The backend never trusts a client-suppliable header's
+    // VALUE to pick between the two (it selects by listener-port
+    // classification, not by reading a URL out of a header) — see that
+    // var's own comment and docs/DEPLOYMENT.md's "both" section.
     STRATOCLAVE_API_ENDPOINT: entryUrl,
+    // Set ONLY under STRATOCLAVE_ENTRY=both (`privateUrl` is otherwise
+    // undefined). backend/mvp/well_known.py's `_derive_api_endpoint` reads
+    // this alongside `STRATOCLAVE_API_ENDPOINT` above and returns THIS
+    // value as the SAFE DEFAULT — only returning `STRATOCLAVE_API_ENDPOINT`
+    // when `core.forwarded_port.is_cloudfront_leg` positively identifies
+    // the CloudFront leg (round-1 implementation review: this file makes no
+    // claim about ALB `X-Forwarded-Port` overwrite semantics; see
+    // `STRATOCLAVE_BOTH_CLOUDFRONT_PORT` below and
+    // `backend/core/forwarded_port.py`'s own doc).
+    ...(entryConfig.mode === 'both' && privateUrl
+      ? { STRATOCLAVE_API_ENDPOINT_PRIVATE: privateUrl }
+      : {}),
+    // Round-1 implementation review (should-fix 3, both reviews' matching
+    // blocker on version/image skew): under STRATOCLAVE_ENTRY=both, the
+    // CloudFront leg of the shared internal ALB (lib/alb-stack.ts) and the
+    // PrivateLink leg share one ALB, one security group, one target group,
+    // and consequently could share one XFF-trust decision if nothing told
+    // them apart. `backend/core/forwarded_port.py` reads
+    // STRATOCLAVE_BOTH_CLOUDFRONT_PORT — the SAME listener-port value
+    // lib/alb-stack.ts's internal ALB build uses for its :80 listener,
+    // sourced from the one constant `BOTH_MODE_CLOUDFRONT_LISTENER_PORT` in
+    // lib/_common.ts, never a second hardcoded literal — to positively
+    // identify the CloudFront leg, and STRATOCLAVE_BOTH_CLOUDFRONT_TRUSTED_HOPS
+    // (lib/_common.ts's BOTH_MODE_CLOUDFRONT_TRUSTED_HOPS) for how many XFF
+    // hops to trust once identified. RATE_LIMIT_TRUSTED_HOPS below is
+    // forced to "0" on the SAME container, in the SAME mode: an older
+    // backend image, built before `forwarded_port.py` existed, reads only
+    // that variable and therefore trusts NO XFF at all on this shared ALB
+    // by default — the fail-closed behaviour across a version-skewed
+    // rolling deploy. Only a backend new enough to read the two variables
+    // above ever trusts XFF on the CloudFront leg specifically.
+    ...(entryConfig.mode === 'both'
+      ? {
+          STRATOCLAVE_BOTH_CLOUDFRONT_PORT: String(BOTH_MODE_CLOUDFRONT_LISTENER_PORT),
+          STRATOCLAVE_BOTH_CLOUDFRONT_TRUSTED_HOPS: String(BOTH_MODE_CLOUDFRONT_TRUSTED_HOPS),
+          RATE_LIMIT_TRUSTED_HOPS: '0',
+        }
+      : {}),
 
     // Comma-separated extra hosts a signed AWS sign-in may also name
     // (`mvp.sso_sts.expected_audiences`), for a deployment reached under
@@ -726,7 +900,7 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // from a shell that forgot to export it does not blank out a value a
     // PREVIOUS deploy configured (docs/DEPLOYMENT.md, "Binding AWS sign-in
     // to this gateway").
-    STRATOCLAVE_STS_AUDIENCES: stsAudiences,
+    STRATOCLAVE_STS_AUDIENCES: stsAudiencesEffective,
     // Requires every signed AWS sign-in to name one of the hosts above
     // (`mvp.sso_sts.audience_required`, read with `core.deployment
     // .strict_flag`: an unrecognised spelling fails the backend's own
@@ -1146,7 +1320,7 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
     {
       id: 'AwsSolutions-EC23',
       reason:
-        'ALB inbound is never 0.0.0.0/0, in either entry mode: `cloudfront` restricts it to the CloudFront origin-facing managed prefix list, and `private` restricts it to the internal NLB\'s own security group only (network-stack.ts, both cases). cdk-nag cannot distinguish a prefix-list or security-group source from "any" so it flags it regardless of mode.',
+        'ALB inbound is never 0.0.0.0/0, in any entry mode: `cloudfront` restricts it to the CloudFront origin-facing managed prefix list, `private` restricts it to the internal NLB\'s own security group only, and `both` admits exactly those two sources together on their respective ports (network-stack.ts, all three cases). cdk-nag cannot distinguish a prefix-list or security-group source from "any" so it flags it regardless of mode.',
     },
     {
       id: 'AwsSolutions-ELB2',
@@ -1230,9 +1404,13 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   // rationale above (which cites CloudFront's edge logs) does not apply to
   // it and is deliberately not suppressed there — an honest absence, not a
   // blanket reuse. `test/nag-synth.test.ts`'s private-mode case pins that
-  // this finding genuinely does not fire once the logs are real.
+  // this finding genuinely does not fire once the logs are real. `both`
+  // mode gets the identical treatment and for the identical reason: its
+  // shared internal ALB also has real access logs (its PrivateLink leg
+  // never touches CloudFront, same as pure `private`), so the ELB2
+  // rationale is equally inapplicable there.
   const albSuppressions =
-    entryConfig.mode === 'private'
+    hasPrivateLinkLeg(entryConfig.mode)
       ? appLevelSuppressions.filter((s) => s.id !== 'AwsSolutions-ELB2')
       : appLevelSuppressions;
   NagSuppressions.addStackSuppressions(albStack, albSuppressions);
@@ -1299,4 +1477,5 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
 console.error(`[stratoclave-iac] prefix=${prefix} bodyRegion=${env.region} wafRegion=${regionCfg.wafRegion} bedrockPrimary=${bedrockPrimaryRegion} bedrockModel=${defaultBedrockModel}`);
 console.error(`[stratoclave-iac] Parameter Store base: ${paramPath(prefix, '')}`);
 console.error(`[stratoclave-iac] ALLOW_ADMIN_CREATION=${allowAdminCreation}`);
+console.error(`[stratoclave-iac] STRATOCLAVE_CLOUDFRONT_ORIGIN=${cloudfrontOriginMode}`);
 console.error(`[stratoclave-iac] enableWaf=${enableWaf} cdkNag=${process.env.CDK_NAG || 'on'}`);

@@ -125,7 +125,17 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   that entry mode, and rely on Cognito's own account lockout (distributed across many
   identities, which this gateway's own per-identity bucket cannot see) for guessing spread
   across many different accounts. See docs/DEPLOYMENT.md, "Rate limits on sign-in routes".
-
+- **`STRATOCLAVE_CLOUDFRONT_ORIGIN` now defaults to `vpc`, not `public`.** A fresh
+  `STRATOCLAVE_ENTRY=cloudfront` deployment builds an internal ALB reached by CloudFront
+  through a CloudFront VPC origin, with no public address at all, instead of an
+  internet-facing one. An EXISTING deployment is not silently moved onto this: a bare
+  `cdk deploy --all` (or `./iac/scripts/deploy-all.sh`) against a deployment whose ALB is
+  still internet-facing is refused at a pre-flight check unless
+  `STRATOCLAVE_CLOUDFRONT_ORIGIN` is set explicitly to one of the three-step migration
+  values or to `public`, the variable that restores the previous default behaviour. See
+  [`docs/DEPLOYMENT.md`, "VPC origin"](docs/DEPLOYMENT.md#vpc-origin) for the migration
+  steps, the Availability Zone limitation, and what the new default does and does not
+  provide.
 - **The gateway refuses to start when `DEFAULT_ORG_ID` does not pass the marker value rule**
   (1 to 256 ASCII letters, digits and `:_@$#=/+,.-`, inner spaces allowed, none leading or
   trailing), and no tenant row is written with such an id. The check runs before the seed.
@@ -133,6 +143,48 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   logging. The default `default-org` passes (C13.6).
 
 ### Added
+
+- **CloudFront VPC origin, replacing a shared-secret origin-verification design that never
+  shipped.** `STRATOCLAVE_CLOUDFRONT_ORIGIN` (`public` | `vpc-expand` | `vpc-switch` |
+  `vpc-contract` | `vpc`, default `vpc`) decides whether the ALB behind CloudFront has a
+  public address. In `vpc` mode CloudFront reaches the ALB through
+  `AWS::CloudFront::VpcOrigin` instead of the ALB's public DNS name, so the ALB has no
+  public address and a third party's own CloudFront distribution cannot reach it directly.
+  `vpc-expand`/`vpc-switch`/`vpc-contract` are three intermediate, staged steps for
+  migrating an existing internet-facing deployment: `vpc-expand` adds the internal ALB and
+  VPC origin alongside the existing public one, whose target-group registration and ALB
+  attributes are not otherwise changed in this step; `vpc-switch` retargets the
+  distribution's behaviours to the VPC origin while the public ALB stays declared as a
+  rollback target; `vpc-contract` stops the frontend and backend from consuming the public
+  ALB's exports while AlbStack still declares them, so the following `vpc` step can remove
+  them without CloudFormation refusing an in-use export deletion; `vpc` removes the public
+  ALB, its target group, and its CloudFront origin. Interruption during the migration —
+  measured on a real migration (`vpc-expand` -> `vpc-switch` -> `vpc-contract` -> `vpc`,
+  each its own `deploy-all.sh` run, against a live internet-facing deployment, with two
+  concurrent probes throughout: an authenticated `GET /api/mvp/me` and an unauthenticated
+  `GET /.well-known/stratoclave-config` roughly once a second, and back-to-back streaming
+  `POST /v1/messages` calls): **zero interrupted requests and zero interrupted streams**
+  across all four steps (2,294 authenticated requests, 382 unauthenticated requests, 231
+  completed streams of 9-13s each, longest gap between consecutive probes 1.4s — ordinary
+  jitter, not a hole). One isolated `401` (1 of 2,294) landed in the same second
+  `vpc-contract`'s ECS rolling deployment finished retargeting the backend service to the
+  internal target group alone; the very next probe a second later was `200`, so this did
+  not compound into an outage. This measured run also caught and fixed a real bug in the
+  migration guard itself — see "Fixed" below. `viewerProtocolPolicy: https-only` on the four ALB
+  behaviours (previously `redirect-to-https`), and the ALB attributes
+  `routing.http.drop_invalid_header_fields.enabled` and `routing.http.desync_mitigation_mode`
+  (set explicitly to AWS's own default, `defensive`), apply unconditionally in every entry
+  mode. See [`docs/DEPLOYMENT.md`, "VPC origin"](docs/DEPLOYMENT.md#vpc-origin).
+- **`STRATOCLAVE_ENTRY=both`: CloudFront and PrivateLink on one shared internal ALB.**
+  Requires the same `STRATOCLAVE_PRIVATE_*` variables as `STRATOCLAVE_ENTRY=private`.
+  `STRATOCLAVE_CLOUDFRONT_ORIGIN` is forced to `vpc` in this mode. The internal ALB has its
+  OWN security group, separate from the one a public ALB would use, admitting the
+  CloudFront origin-facing prefix list on :80 and the internal NLB's security group on
+  :443; PrivateLink traffic does not pass through CloudFront or WAF. `STRATOCLAVE_API_ENDPOINT_PRIVATE`
+  is added to the task environment in this mode only; `STRATOCLAVE_STS_AUDIENCES` is set in
+  every mode (read by `mvp.sso_sts.expected_audiences`), with the PrivateLink host appended
+  only under `both`. See [`docs/DEPLOYMENT.md`,
+  "Both"](docs/DEPLOYMENT.md#both-cloudfront-and-privatelink-together).
 
 - **Model invocation logs can be attributed to a user and a task, on every transport
   (C13.6).** The correlation marker now carries `sc_user`, the principal's `user_id`, and

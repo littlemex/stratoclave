@@ -176,6 +176,33 @@ def test_extra_audiences_are_configured_separately(monkeypatch):
         sso_sts.validate_audience_config()
 
 
+def test_both_modes_appended_privatelink_host_normalises_through_host_of(monkeypatch):
+    """Round-1 implementation review, Fable should-fix 11: confirm
+    `expected_audiences()` actually normalises the PrivateLink host
+    `bin/iac.ts`'s `stsAudiencesEffective` appends under
+    `STRATOCLAVE_ENTRY=both`, through `host_of`, rather than assuming it
+    from reading `sso_sts.py` alone. The value here is the EXACT string that
+    code produces: privateUrl = `https://${entryConfig.privateEntry.domainName}`,
+    where `domainName` is `STRATOCLAVE_PRIVATE_DOMAIN` (validated by
+    `lib/entry-config.ts`'s `BARE_HOSTNAME_RE` to already be a bare lowercase
+    hostname) -- `stratoclave.internal.example.com` is the exact example
+    value `docs/DEPLOYMENT.md` and `iac/test/both-entry.test.ts` both use for
+    it, not a value picked independently for this test.
+    """
+    monkeypatch.setenv("STRATOCLAVE_API_ENDPOINT", "https://d1.cloudfront.net")
+    monkeypatch.setenv(
+        "STRATOCLAVE_STS_AUDIENCES",
+        "https://stratoclave.internal.example.com",
+    )
+    assert sso_sts.expected_audiences() == {
+        "d1.cloudfront.net",
+        "stratoclave.internal.example.com",
+    }
+    # validate_audience_config must accept this value too -- a deployment
+    # with a correctly-formed PrivateLink domain must not refuse to start.
+    sso_sts.validate_audience_config()  # must not raise
+
+
 @pytest.mark.parametrize("auth", [
     "AWS4-HMAC-SHA256 Credential=A/x, SignedHeaders=host, SignedHeaders=host;x-stratoclave-audience, Signature=a",
     "AWS4-HMAC-SHA256 Credential=A/x, SignedHeaders=host;x-stratoclave-audience",

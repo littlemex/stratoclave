@@ -1,10 +1,10 @@
 // Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
 
-exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches on are pinned alb: the load balancer and its listeners are pinned 1`] = `
+exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN unset (default = vpc): the resources this feature branches on are pinned alb: the load balancer(s) and their listeners are pinned 1`] = `
 {
-  "Alb16C2F182": {
+  "InternalAlb58CEEAE8": {
     "Metadata": {
-      "aws:cdk:path": "defaultentrytest-alb/Alb/Resource",
+      "aws:cdk:path": "defaultentrytest-alb/InternalAlb/Resource",
     },
     "Properties": {
       "LoadBalancerAttributes": [
@@ -16,20 +16,31 @@ exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches 
           "Key": "routing.http2.enabled",
           "Value": "true",
         },
+        {
+          "Key": "idle_timeout.timeout_seconds",
+          "Value": "60",
+        },
+        {
+          "Key": "routing.http.drop_invalid_header_fields.enabled",
+          "Value": "true",
+        },
+        {
+          "Key": "routing.http.desync_mitigation_mode",
+          "Value": "defensive",
+        },
       ],
-      "Name": "defaultentrytest-alb",
-      "Scheme": "internet-facing",
+      "Scheme": "internal",
       "SecurityGroups": [
         {
-          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputFnGetAttAlbSecurityGroup86A59E99GroupIdE3A37BC7",
+          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputFnGetAttInternalAlbSecurityGroup32D71C5AGroupIdB19046BB",
         },
       ],
       "Subnets": [
         {
-          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputRefVpcPublicSubnet1Subnet5C2D37C4FFA2B456",
+          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputRefVpcPrivateIsolatedSubnet1Subnet419CB160971D5E0E",
         },
         {
-          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputRefVpcPublicSubnet2Subnet691E08A351552740",
+          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputRefVpcPrivateIsolatedSubnet2Subnet886BB83A64B1DD77",
         },
       ],
       "Tags": [
@@ -54,21 +65,21 @@ exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches 
     },
     "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
   },
-  "AlbHttpListener00C8B33E": {
+  "InternalAlbInternalHttpListener9436A291": {
     "Metadata": {
-      "aws:cdk:path": "defaultentrytest-alb/Alb/HttpListener/Resource",
+      "aws:cdk:path": "defaultentrytest-alb/InternalAlb/InternalHttpListener/Resource",
     },
     "Properties": {
       "DefaultActions": [
         {
           "TargetGroupArn": {
-            "Ref": "BackendTargetGroupECF98930",
+            "Ref": "InternalBackendTargetGroup14D4A4DA",
           },
           "Type": "forward",
         },
       ],
       "LoadBalancerArn": {
-        "Ref": "Alb16C2F182",
+        "Ref": "InternalAlb58CEEAE8",
       },
       "Port": 80,
       "Protocol": "HTTP",
@@ -96,7 +107,7 @@ exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches 
 }
 `;
 
-exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches on are pinned cognito: the UserPoolClient callback/logout URLs are pinned 1`] = `
+exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN unset (default = vpc): the resources this feature branches on are pinned cognito: the UserPoolClient callback/logout URLs are pinned 1`] = `
 {
   "CallbackURLs": [
     "http://127.0.0.1:18080/callback",
@@ -132,11 +143,346 @@ exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches 
 }
 `;
 
-exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches on are pinned network: the ALB security-group ingress rule(s) and the CloudFront prefix-list lookup are pinned 1`] = `
+exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN unset (default = vpc): the resources this feature branches on are pinned frontend: the CloudFront origins and the four ALB behaviours are pinned 1`] = `
+{
+  "albOrigins": [
+    {
+      "DomainName": {
+        "Fn::ImportValue": "defaultentrytest-alb:ExportsOutputFnGetAttInternalAlb58CEEAE8DNSName2E20C2AC",
+      },
+      "Id": "ALBVpcOrigin",
+      "VpcOriginConfig": {
+        "OriginKeepaliveTimeout": 60,
+        "OriginReadTimeout": 60,
+        "VpcOriginId": {
+          "Fn::GetAtt": [
+            "VpcOrigin65BCA67E",
+            "Id",
+          ],
+        },
+      },
+    },
+  ],
+  "behaviours": [
+    {
+      "PathPattern": "/api/*",
+      "TargetOriginId": "ALBVpcOrigin",
+      "ViewerProtocolPolicy": "https-only",
+    },
+    {
+      "PathPattern": "/v1/*",
+      "TargetOriginId": "ALBVpcOrigin",
+      "ViewerProtocolPolicy": "https-only",
+    },
+    {
+      "PathPattern": "/openai/*",
+      "TargetOriginId": "ALBVpcOrigin",
+      "ViewerProtocolPolicy": "https-only",
+    },
+    {
+      "PathPattern": "/.well-known/*",
+      "TargetOriginId": "ALBVpcOrigin",
+      "ViewerProtocolPolicy": "https-only",
+    },
+  ],
+}
+`;
+
+exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN unset (default = vpc): the resources this feature branches on are pinned network: the ALB security-group ingress rule(s) and the CloudFront prefix-list lookup are pinned 1`] = `
+{
+  "CloudFrontOriginFacingPrefixListLookupE17CADC1": {
+    "DeletionPolicy": "Delete",
+    "DependsOn": [
+      "CloudFrontOriginFacingPrefixListLookupCustomResourcePolicy71ED6615",
+    ],
+    "Metadata": {
+      "aws:cdk:path": "defaultentrytest-network/CloudFrontOriginFacingPrefixListLookup/Resource/Default",
+    },
+    "Properties": {
+      "Create": "{"service":"EC2","action":"describeManagedPrefixLists","parameters":{"Filters":[{"Name":"prefix-list-name","Values":["com.amazonaws.global.cloudfront.origin-facing"]}]},"physicalResourceId":{"id":"cloudfront-origin-facing-prefix-list"}}",
+      "InstallLatestAwsSdk": false,
+      "ServiceToken": {
+        "Fn::GetAtt": [
+          "AWS679f53fac002430cb0da5b7982bd22872D164C4C",
+          "Arn",
+        ],
+      },
+      "Update": "{"service":"EC2","action":"describeManagedPrefixLists","parameters":{"Filters":[{"Name":"prefix-list-name","Values":["com.amazonaws.global.cloudfront.origin-facing"]}]},"physicalResourceId":{"id":"cloudfront-origin-facing-prefix-list"}}",
+    },
+    "Type": "Custom::AWS",
+    "UpdateReplacePolicy": "Delete",
+  },
+  "EcsSecurityGroupfromdefaultentrytestnetworkInternalAlbSecurityGroup5343AFFF800024BF562B": {
+    "Metadata": {
+      "aws:cdk:path": "defaultentrytest-network/EcsSecurityGroup/from defaultentrytestnetworkInternalAlbSecurityGroup5343AFFF:8000",
+    },
+    "Properties": {
+      "Description": "Load balancer to target",
+      "FromPort": 8000,
+      "GroupId": {
+        "Fn::GetAtt": [
+          "EcsSecurityGroup44008BF1",
+          "GroupId",
+        ],
+      },
+      "IpProtocol": "tcp",
+      "SourceSecurityGroupId": {
+        "Fn::GetAtt": [
+          "InternalAlbSecurityGroup32D71C5A",
+          "GroupId",
+        ],
+      },
+      "ToPort": 8000,
+    },
+    "Type": "AWS::EC2::SecurityGroupIngress",
+  },
+  "InternalAlbSecurityGroupfromIndirectPeer805D7324BB": {
+    "Metadata": {
+      "aws:cdk:path": "defaultentrytest-network/InternalAlbSecurityGroup/from {IndirectPeer}:80",
+    },
+    "Properties": {
+      "Description": "Allow HTTP from CloudFront edge locations only (VPC origin)",
+      "FromPort": 80,
+      "GroupId": {
+        "Fn::GetAtt": [
+          "InternalAlbSecurityGroup32D71C5A",
+          "GroupId",
+        ],
+      },
+      "IpProtocol": "tcp",
+      "SourcePrefixListId": {
+        "Fn::GetAtt": [
+          "CloudFrontOriginFacingPrefixListLookupE17CADC1",
+          "PrefixLists.0.PrefixListId",
+        ],
+      },
+      "ToPort": 80,
+    },
+    "Type": "AWS::EC2::SecurityGroupIngress",
+  },
+}
+`;
+
+exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN unset (default = vpc): the resources this feature branches on are pinned the ECS task env entries this feature branches on are pinned 1`] = `
+{
+  "CORS_ORIGINS": {
+    "Fn::Join": [
+      "",
+      [
+        "https://",
+        {
+          "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+        },
+      ],
+    ],
+  },
+  "STRATOCLAVE_API_ENDPOINT": {
+    "Fn::Join": [
+      "",
+      [
+        "https://",
+        {
+          "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+        },
+      ],
+    ],
+  },
+}
+`;
+
+exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN=public (explicit, documented fallback): the resources this feature branches on are pinned alb: the load balancer(s) and their listeners are pinned 1`] = `
+{
+  "Alb16C2F182": {
+    "Metadata": {
+      "aws:cdk:path": "publicentrytest-alb/Alb/Resource",
+    },
+    "Properties": {
+      "LoadBalancerAttributes": [
+        {
+          "Key": "deletion_protection.enabled",
+          "Value": "false",
+        },
+        {
+          "Key": "routing.http2.enabled",
+          "Value": "true",
+        },
+        {
+          "Key": "idle_timeout.timeout_seconds",
+          "Value": "60",
+        },
+        {
+          "Key": "routing.http.drop_invalid_header_fields.enabled",
+          "Value": "true",
+        },
+        {
+          "Key": "routing.http.desync_mitigation_mode",
+          "Value": "defensive",
+        },
+      ],
+      "Name": "publicentrytest-alb",
+      "Scheme": "internet-facing",
+      "SecurityGroups": [
+        {
+          "Fn::ImportValue": "publicentrytest-network:ExportsOutputFnGetAttAlbSecurityGroup86A59E99GroupIdE3A37BC7",
+        },
+      ],
+      "Subnets": [
+        {
+          "Fn::ImportValue": "publicentrytest-network:ExportsOutputRefVpcPublicSubnet1Subnet5C2D37C4FFA2B456",
+        },
+        {
+          "Fn::ImportValue": "publicentrytest-network:ExportsOutputRefVpcPublicSubnet2Subnet691E08A351552740",
+        },
+      ],
+      "Tags": [
+        {
+          "Key": "ManagedBy",
+          "Value": "CDK",
+        },
+        {
+          "Key": "Prefix",
+          "Value": "publicentrytest",
+        },
+        {
+          "Key": "Project",
+          "Value": "Stratoclave",
+        },
+        {
+          "Key": "Stack",
+          "Value": "ALB",
+        },
+      ],
+      "Type": "application",
+    },
+    "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+  },
+  "AlbHttpListener00C8B33E": {
+    "Metadata": {
+      "aws:cdk:path": "publicentrytest-alb/Alb/HttpListener/Resource",
+    },
+    "Properties": {
+      "DefaultActions": [
+        {
+          "TargetGroupArn": {
+            "Ref": "BackendTargetGroupECF98930",
+          },
+          "Type": "forward",
+        },
+      ],
+      "LoadBalancerArn": {
+        "Ref": "Alb16C2F182",
+      },
+      "Port": 80,
+      "Protocol": "HTTP",
+      "Tags": [
+        {
+          "Key": "ManagedBy",
+          "Value": "CDK",
+        },
+        {
+          "Key": "Prefix",
+          "Value": "publicentrytest",
+        },
+        {
+          "Key": "Project",
+          "Value": "Stratoclave",
+        },
+        {
+          "Key": "Stack",
+          "Value": "ALB",
+        },
+      ],
+    },
+    "Type": "AWS::ElasticLoadBalancingV2::Listener",
+  },
+}
+`;
+
+exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN=public (explicit, documented fallback): the resources this feature branches on are pinned cognito: the UserPoolClient callback/logout URLs are pinned 1`] = `
+{
+  "CallbackURLs": [
+    "http://127.0.0.1:18080/callback",
+    "http://localhost:3003/callback",
+    {
+      "Fn::Join": [
+        "",
+        [
+          "https://",
+          {
+            "Fn::ImportValue": "publicentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+          },
+          "/callback",
+        ],
+      ],
+    },
+  ],
+  "LogoutURLs": [
+    "http://127.0.0.1:18080",
+    "http://localhost:3003",
+    {
+      "Fn::Join": [
+        "",
+        [
+          "https://",
+          {
+            "Fn::ImportValue": "publicentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+          },
+        ],
+      ],
+    },
+  ],
+}
+`;
+
+exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN=public (explicit, documented fallback): the resources this feature branches on are pinned frontend: the CloudFront origins and the four ALB behaviours are pinned 1`] = `
+{
+  "albOrigins": [
+    {
+      "CustomOriginConfig": {
+        "HTTPPort": 80,
+        "OriginKeepaliveTimeout": 60,
+        "OriginProtocolPolicy": "http-only",
+        "OriginReadTimeout": 60,
+        "OriginSSLProtocols": [
+          "TLSv1.2",
+        ],
+      },
+      "DomainName": {
+        "Fn::ImportValue": "publicentrytest-alb:ExportsOutputFnGetAttAlb16C2F182DNSNameB67BDABC",
+      },
+      "Id": "ALBOrigin",
+    },
+  ],
+  "behaviours": [
+    {
+      "PathPattern": "/api/*",
+      "TargetOriginId": "ALBOrigin",
+      "ViewerProtocolPolicy": "https-only",
+    },
+    {
+      "PathPattern": "/v1/*",
+      "TargetOriginId": "ALBOrigin",
+      "ViewerProtocolPolicy": "https-only",
+    },
+    {
+      "PathPattern": "/openai/*",
+      "TargetOriginId": "ALBOrigin",
+      "ViewerProtocolPolicy": "https-only",
+    },
+    {
+      "PathPattern": "/.well-known/*",
+      "TargetOriginId": "ALBOrigin",
+      "ViewerProtocolPolicy": "https-only",
+    },
+  ],
+}
+`;
+
+exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN=public (explicit, documented fallback): the resources this feature branches on are pinned network: the ALB security-group ingress rule(s) and the CloudFront prefix-list lookup are pinned 1`] = `
 {
   "AlbSecurityGroupfromIndirectPeer80C02E7218": {
     "Metadata": {
-      "aws:cdk:path": "defaultentrytest-network/AlbSecurityGroup/from {IndirectPeer}:80",
+      "aws:cdk:path": "publicentrytest-network/AlbSecurityGroup/from {IndirectPeer}:80",
     },
     "Properties": {
       "Description": "Allow HTTP from CloudFront edge locations only",
@@ -164,7 +510,7 @@ exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches 
       "CloudFrontOriginFacingPrefixListLookupCustomResourcePolicy71ED6615",
     ],
     "Metadata": {
-      "aws:cdk:path": "defaultentrytest-network/CloudFrontOriginFacingPrefixListLookup/Resource/Default",
+      "aws:cdk:path": "publicentrytest-network/CloudFrontOriginFacingPrefixListLookup/Resource/Default",
     },
     "Properties": {
       "Create": "{"service":"EC2","action":"describeManagedPrefixLists","parameters":{"Filters":[{"Name":"prefix-list-name","Values":["com.amazonaws.global.cloudfront.origin-facing"]}]},"physicalResourceId":{"id":"cloudfront-origin-facing-prefix-list"}}",
@@ -180,12 +526,12 @@ exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches 
     "Type": "Custom::AWS",
     "UpdateReplacePolicy": "Delete",
   },
-  "EcsSecurityGroupfromdefaultentrytestnetworkAlbSecurityGroupF7BE8E1C8000061BACFE": {
+  "EcsSecurityGroupfrompublicentrytestnetworkAlbSecurityGroup3A24E2E980005E3EF9CD": {
     "Metadata": {
-      "aws:cdk:path": "defaultentrytest-network/EcsSecurityGroup/from defaultentrytestnetworkAlbSecurityGroupF7BE8E1C:8000",
+      "aws:cdk:path": "publicentrytest-network/EcsSecurityGroup/from publicentrytestnetworkAlbSecurityGroup3A24E2E9:8000",
     },
     "Properties": {
-      "Description": "Allow traffic from ALB on port 8000",
+      "Description": "Allow traffic from the public ALB on port 8000",
       "FromPort": 8000,
       "GroupId": {
         "Fn::GetAtt": [
@@ -207,7 +553,7 @@ exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches 
 }
 `;
 
-exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches on are pinned the ECS task env entries this feature branches on are pinned 1`] = `
+exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN=public (explicit, documented fallback): the resources this feature branches on are pinned the ECS task env entries this feature branches on are pinned 1`] = `
 {
   "CORS_ORIGINS": {
     "Fn::Join": [
@@ -215,7 +561,7 @@ exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches 
       [
         "https://",
         {
-          "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+          "Fn::ImportValue": "publicentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
         },
       ],
     ],
@@ -226,7 +572,7 @@ exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches 
       [
         "https://",
         {
-          "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+          "Fn::ImportValue": "publicentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
         },
       ],
     ],

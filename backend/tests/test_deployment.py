@@ -117,18 +117,54 @@ class TestValidateApiEndpoint:
         deployment.validate_api_endpoint()  # must not raise
 
 
+class TestValidateApiEndpointPrivate:
+    """`STRATOCLAVE_API_ENDPOINT_PRIVATE` — set only by `iac/bin/iac.ts` under
+    `STRATOCLAVE_ENTRY=both`. Unlike `STRATOCLAVE_API_ENDPOINT`, unset is the
+    normal case (every entry mode except `both`), so only a PRESENT,
+    malformed value is a startup failure."""
+
+    def test_unset_passes_in_any_environment(self, monkeypatch):
+        monkeypatch.delenv("STRATOCLAVE_API_ENDPOINT_PRIVATE", raising=False)
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        deployment.validate_api_endpoint_private()  # must not raise
+        assert deployment.api_endpoint_private() is None
+
+    def test_a_scheme_less_value_raises(self, monkeypatch):
+        monkeypatch.setenv("STRATOCLAVE_API_ENDPOINT_PRIVATE", "stratoclave.internal.example.com")
+        with pytest.raises(RuntimeError, match="absolute http"):
+            deployment.validate_api_endpoint_private()
+
+    def test_a_valid_value_passes_and_is_returned_without_a_trailing_slash(self, monkeypatch):
+        monkeypatch.setenv(
+            "STRATOCLAVE_API_ENDPOINT_PRIVATE", "https://stratoclave.internal.example.com/"
+        )
+        deployment.validate_api_endpoint_private()  # must not raise
+        assert deployment.api_endpoint_private() == "https://stratoclave.internal.example.com"
+
+
 def test_lifespan_calls_both_startup_validators(monkeypatch):
-    """`main.py`'s lifespan calls `validate_api_endpoint` and
-    `validate_audience_config`, in that order, before it seeds the database --
-    reading the source rather than driving the ASGI lifespan, which would need
-    a live DynamoDB/Cognito to construct the app at all."""
+    """`main.py`'s lifespan calls `validate_api_endpoint`,
+    `validate_api_endpoint_private`, and `validate_audience_config`, in that
+    order, before it seeds the database -- reading the source rather than
+    driving the ASGI lifespan, which would need a live DynamoDB/Cognito to
+    construct the app at all.
+
+    `validate_api_endpoint_private` is pinned here specifically because
+    round-1 implementation review of the STRATOCLAVE_ENTRY=both change asked
+    for a test that fails if it is removed from startup -- a deployment
+    whose STRATOCLAVE_API_ENDPOINT_PRIVATE is malformed must refuse to start,
+    the same way one with a malformed STRATOCLAVE_API_ENDPOINT already does;
+    `test_deployment.py`'s own `TestValidateApiEndpointPrivate` class proves
+    the validator function works correctly in isolation, but proves nothing
+    about whether `main.py` actually calls it."""
     main_source = (ROOT / "backend" / "main.py").read_text()
     lifespan_body = main_source.split("async def lifespan(", 1)[1]
     endpoint_at = lifespan_body.index("validate_api_endpoint()")
+    private_endpoint_at = lifespan_body.index("validate_api_endpoint_private()")
     audience_at = lifespan_body.index("validate_audience_config()")
     seed_at = lifespan_body.index("seed_all()")
-    assert endpoint_at < audience_at < seed_at, (
-        "both startup validators must run, in this order, before the seed -- "
-        "a misconfigured gateway must refuse to start rather than seed data "
-        "it will not serve correctly"
+    assert endpoint_at < private_endpoint_at < audience_at < seed_at, (
+        "all three startup validators must run, in this order, before the "
+        "seed -- a misconfigured gateway must refuse to start rather than "
+        "seed data it will not serve correctly"
     )

@@ -163,6 +163,47 @@ describe('a fresh deployment starts under ENVIRONMENT=production, for every tier
         STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: 'arn:aws:iam::123456789012:root',
       },
     ],
+    // `STRATOCLAVE_ENTRY=both`: CloudFront (via a VPC origin) and PrivateLink
+    // share one internal ALB and one backend (see lib/entry-config.ts's
+    // `EntryConfig` doc). Sets STRATOCLAVE_API_ENDPOINT_PRIVATE and
+    // STRATOCLAVE_STS_AUDIENCES on the container in addition to everything
+    // `private` sets -- `core.deployment.validate_api_endpoint_private` and
+    // `mvp.sso_sts.validate_audience_config` both run at startup against
+    // these, so this is the one case that actually exercises them with a
+    // non-empty value rather than the all-other-modes "unset, no-op" path.
+    [
+      'both entry, dev resource tier',
+      {
+        STRATOCLAVE_ENTRY: 'both',
+        STRATOCLAVE_PRIVATE_CERTIFICATE_ARN:
+          'arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555',
+        STRATOCLAVE_PRIVATE_DOMAIN: 'stratoclave.internal.example.com',
+        STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: 'arn:aws:iam::123456789012:root',
+      },
+    ],
+    [
+      'both entry, prod resource tier',
+      {
+        ENVIRONMENT: 'production',
+        STRATOCLAVE_ENTRY: 'both',
+        STRATOCLAVE_PRIVATE_CERTIFICATE_ARN:
+          'arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555',
+        STRATOCLAVE_PRIVATE_DOMAIN: 'stratoclave.internal.example.com',
+        STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: 'arn:aws:iam::123456789012:root',
+      },
+    ],
+    // `STRATOCLAVE_CLOUDFRONT_ORIGIN`'s other states (lib/entry-config.ts's
+    // `CloudfrontOriginMode` doc): `vpc` is the implicit default already
+    // covered by the two plain `cloudfront entry` cases above (unset ->
+    // `vpc` since this feature landed); these three cover the explicit
+    // fallback and the two migration steps, none of which change any
+    // backend-visible env key or value -- only lib/alb-stack.ts's/
+    // lib/network-stack.ts's own resources differ -- so this is really
+    // "synth still succeeds and the container env this test reads is
+    // unaffected", not a new code path in main.py's own validation.
+    ['cloudfront entry, explicit public fallback', { STRATOCLAVE_CLOUDFRONT_ORIGIN: 'public' }],
+    ['cloudfront entry, vpc-expand migration step', { STRATOCLAVE_CLOUDFRONT_ORIGIN: 'vpc-expand' }],
+    ['cloudfront entry, vpc-switch migration step', { STRATOCLAVE_CLOUDFRONT_ORIGIN: 'vpc-switch' }],
   ];
 
   test.each(cases)('%s', (_label, synthEnv) => {
