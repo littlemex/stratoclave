@@ -34,6 +34,8 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-11-15
+
 ### Upgrade notes
 
 - **`ENVIRONMENT` as the container sees it is now always `'production'`, independent of the
@@ -144,6 +146,24 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Added
 
+- **`STRATOCLAVE_INFERENCE_REGIONS` keeps Bedrock inference inside the regions you list.**
+  A comma-separated list of AWS regions (optional). Only models whose every destination lies
+  inside it are offered; the gateway role's Bedrock permissions are generated from the same
+  list, so AWS refuses a call outside it too; startup and failover respect it. Unset keeps
+  the previous behaviour. It cannot be combined with `STRATOCLAVE_RESIDENCY`.
+- **`STRATOCLAVE_ENTRY=private`: a headless entry reachable only over AWS PrivateLink.** An
+  internal load balancer on 443 behind a Network Load Balancer, published as a VPC endpoint
+  service that accepts only the AWS principals you list; no CloudFront, no console, no public
+  address. It is a separate deployment shape, not an in-place switch from `cloudfront`; see
+  docs/DEPLOYMENT.md, "Private entry (PrivateLink), headless".
+- **`stratoclave setup --allow-internal-host`.** Needed to point the CLI at a private entry
+  whose name ends in `.internal`, `.local` or `.localdomain`; it lifts only that check.
+- **`GET /api/mvp/me/rates`** (requires `usage:read-self`) returns the billing rate table for
+  the models the caller may use; `/me/usage-history` rows now carry `cost_microusd` and
+  `request_id`.
+- **A reviewed pricing floor for Claude Fable 5.2** under its own key, at 0.8 times the
+  Fable 5.1 rate on every leg.
+
 - **CloudFront VPC origin, replacing a shared-secret origin-verification design that never
   shipped.** `STRATOCLAVE_CLOUDFRONT_ORIGIN` (`public` | `vpc-expand` | `vpc-switch` |
   `vpc-contract` | `vpc`, default `vpc`) decides whether the ALB behind CloudFront has a
@@ -210,6 +230,22 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   adds a table the document does not name. No runtime change.
 
 ### Fixed
+
+- **`GET /api/mvp/admin/usage-logs` with no filter answered 500.** It now answers 400 and asks
+  for `tenant_id` or `user_id`; the console's Usage logs page waits for a filter before it
+  queries. The table stays closed to full scans by design.
+- **Model discovery's probe skipped a widened pricing leg in its rate-magnitude check,** which
+  let a model whose rate card is published under only one scope verify at any cheap key.
+  Every leg is compared now.
+- **`/v1/chat/completions` returned `reasoning_content` as an object.** It is a string now,
+  with the signature and redacted content in `reasoning_details`; the object shape made
+  OpenAI-compatible routers such as vLLM Semantic Router answer 502.
+- **`/v1/chat/completions` put the two cache legs at the top of `usage`** in the Anthropic
+  shape on Claude-family responses. They are under `usage.prompt_tokens_details` now.
+- **The OpenAI-compatible routes sent no correlation marker.** They now stamp `sc_tenant` and
+  `sc_attempt_id` the same way the Converse routes do (issue #247).
+- **The console's pool-mode sentence and follow-seats button** are composed in the reader's
+  language, and a manual pool with no figure shows a dash rather than `$0.00`.
 
 - **A tenant id with a character Bedrock does not accept in `requestMetadata` (such as
   `|`, or any non-ASCII) made every Converse call for that tenant fail with

@@ -18,7 +18,7 @@ httpx==0.28.1
 # match on every input. A transitive version is not a declared contract; a
 # future httpx release dropping or reshaping it must not silently change
 # this module's own behaviour.
-idna==3.7
+idna==3.15
 
 # AWS
 boto3==1.44.1

@@ -908,7 +908,7 @@ place. The script prints the stack outputs you need:
 Outputs:
 stratoclave-private-link.EndpointServiceName = com.amazonaws.vpce.us-east-1.vpce-svc-00000000000000000
 stratoclave-private-link.PrivateUrl = https://stratoclave.internal.example.com
-stratoclave-alb.AlbDnsName = stratoclave-alb-0000000000.us-east-1.elb.amazonaws.com
+stratoclave-alb.AlbDnsName = <your-internal-alb-dns-name>
 ```
 
 (Illustrative values above; your actual output names the real endpoint
