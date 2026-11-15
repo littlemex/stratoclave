@@ -159,7 +159,18 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   ALB's exports while AlbStack still declares them, so the following `vpc` step can remove
   them without CloudFormation refusing an in-use export deletion; `vpc` removes the public
   ALB, its target group, and its CloudFront origin. Interruption during the migration —
-  measured on a real migration: TBD. `viewerProtocolPolicy: https-only` on the four ALB
+  measured on a real migration (`vpc-expand` -> `vpc-switch` -> `vpc-contract` -> `vpc`,
+  each its own `deploy-all.sh` run, against a live internet-facing deployment, with two
+  concurrent probes throughout: an authenticated `GET /api/mvp/me` and an unauthenticated
+  `GET /.well-known/stratoclave-config` roughly once a second, and back-to-back streaming
+  `POST /v1/messages` calls): **zero interrupted requests and zero interrupted streams**
+  across all four steps (2,294 authenticated requests, 382 unauthenticated requests, 231
+  completed streams of 9-13s each, longest gap between consecutive probes 1.4s — ordinary
+  jitter, not a hole). One isolated `401` (1 of 2,294) landed in the same second
+  `vpc-contract`'s ECS rolling deployment finished retargeting the backend service to the
+  internal target group alone; the very next probe a second later was `200`, so this did
+  not compound into an outage. This measured run also caught and fixed a real bug in the
+  migration guard itself — see "Fixed" below. `viewerProtocolPolicy: https-only` on the four ALB
   behaviours (previously `redirect-to-https`), and the ALB attributes
   `routing.http.drop_invalid_header_fields.enabled` and `routing.http.desync_mitigation_mode`
   (set explicitly to AWS's own default, `defensive`), apply unconditionally in every entry
@@ -199,6 +210,26 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   adds a table the document does not name. No runtime change.
 
 ### Fixed
+
+- **The vpc-origin migration guard let a never-migrated deployment jump straight to `vpc`,
+  dropping live traffic.** `check_cloudfront_origin_migration_guard` (`iac/scripts/
+  deploy-all.sh`) only resolved whether the live CloudFront distribution still declared the
+  public `ALBOrigin` inside the branch that also required the internal ALB to already
+  exist — so on a deployment that had never run `vpc-expand` (no internal ALB yet), that
+  fact stayed at its `false` default even though the distribution plainly still declared
+  `ALBOrigin`, and `cfo_migration_decision`'s `vpc` branch read "false" as "nothing to
+  refuse." Confirmed on a real deployment: with `STRATOCLAVE_CLOUDFRONT_ORIGIN` unset
+  (default `vpc`) against a live, internet-facing, never-migrated deployment, this let
+  `deploy_stacks --all` run into `NetworkStack` and `AlbStack` — removing the public ALB's
+  security-group ingress rule — before CloudFormation's own export-in-use protection
+  stopped `AlbStack`'s own update, dropping live CloudFront traffic for about 115 seconds
+  until a `STRATOCLAVE_CLOUDFRONT_ORIGIN=public` redeploy restored it. The fix resolves
+  whether the public origin is still declared whenever `FrontendStack`'s distribution
+  exists, independent of whether the internal ALB exists yet.
+  `iac/scripts/test-cloudfront-origin-migration-guard-wrapper.sh` pins this: it exercises
+  the AWS-querying wrapper itself (with a stubbed `aws` CLI), not just the pure decision
+  function it feeds, which is what let this ship despite that function's own existing tests
+  all passing.
 
 - **A tenant id with a character Bedrock does not accept in `requestMetadata` (such as
   `|`, or any non-ASCII) made every Converse call for that tenant fail with
