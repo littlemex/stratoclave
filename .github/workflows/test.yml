@@ -152,6 +152,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
       AWS_REGION: us-east-1
       ENVIRONMENT: ci
+      STRATOCLAVE_API_ENDPOINT: http://127.0.0.1:8080
       STRATOCLAVE_CODEX_ENABLED: "true"
     steps:
       - uses: actions/checkout@v7
