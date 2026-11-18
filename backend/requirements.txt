@@ -3,7 +3,7 @@
 # package listed here ends up in the shipped container.
 
 # FastAPI
-fastapi==0.162.5
+fastapi==0.162.7
 uvicorn[standard]==0.54.0
 python-multipart==0.0.33
 
@@ -18,10 +18,10 @@ httpx==0.28.1
 # match on every input. A transitive version is not a declared contract; a
 # future httpx release dropping or reshaping it must not silently change
 # this module's own behaviour.
-idna==3.15
+idna==3.20
 
 # AWS
-boto3==1.44.1
+boto3==1.44.3
 # Mints short-lived bearer tokens for the OpenAI-compatible surface on
 # bedrock-runtime (Responses and Chat Completions).
 # `expiry=timedelta(seconds=900)` (mvp/_openai_transport.py's DEFAULT_TOKEN_TTL) keeps
@@ -30,7 +30,7 @@ aws-bedrock-token-generator==1.1.0
 
 # Utilities
 pydantic[email]==2.14.3
-pydantic-settings==2.16.2
+pydantic-settings==2.16.3
 python-dotenv==1.2.4
 
 # Observability
