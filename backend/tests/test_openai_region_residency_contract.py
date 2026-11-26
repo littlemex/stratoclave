@@ -31,7 +31,7 @@ from mvp.models import _REGISTRY
 # made the model. Filtering by provider under-counted the moment a non-OpenAI model
 # (Grok, in us-west-2) joined that transport, which would have certified a posture
 # narrower than the one actually in force.
-EXPECTED_OPENAI_REGIONS = {"us-east-2", "us-west-2"}
+EXPECTED_OPENAI_REGIONS = {"us-east-1", "us-east-2", "us-west-2"}
 
 
 def test_openai_registry_regions_match_iac_constant():
