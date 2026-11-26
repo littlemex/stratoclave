@@ -27,7 +27,24 @@ const DOCS = resolve(process.cwd(), '..', 'docs')
 const PAGE = pathToFileURL(resolve(DOCS, 'index.html')).href
 const DOCS_URL = pathToFileURL(DOCS).href + '/'
 // Japanese entries that are names and stay as they are.
-const JA_NAMES = new Set(['hero.v.bedrock', 'vs.eyebrow'])
+const JA_NAMES = new Set([
+  'hero.v.bedrock',
+  'vs.eyebrow',
+  'arch.alb',
+  'arch.br',
+  'arch.cf',
+  'arch.cg',
+  'arch.ddb',
+  'arch.gws',
+  'arch.lbr',
+  'arch.lddb',
+  'arch.lgws',
+  'arch.nlb',
+  'arch.pl',
+  'arch.s3',
+  'arch.sts',
+  'arch.vpc',
+])
 // Kana, kanji and Japanese punctuation.
 const JAPANESE = /[\u3000-\u30ff\u4e00-\u9fff]/
 
