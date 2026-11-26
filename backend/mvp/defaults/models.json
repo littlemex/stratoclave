@@ -354,6 +354,24 @@
     },
     {
       "provider": "openai",
+      "bedrock_model_id": "us.openai.gpt-6.2-sol",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "gpt-6.2-sol",
+        "openai.gpt-6.2-sol",
+        "us.openai.gpt-6.2-sol"
+      ],
+      "wire_protocol": "responses",
+      "profile_scope": "us",
+      "model_family": "gpt-6.2-sol",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
+      "pricing_key": "gpt-6.2-sol",
+      "notes": "Flagship GPT-6.2 tier on bedrock-runtime OpenAI-compatible endpoint; its own pricing_key, same reasoning as gpt-5.6-sol. Region is us-east-1 because `mvp.discovery.reconcile` (2026-11-26) lists only that one destination region for this profile's rate card, unlike gpt-5.6-sol/gpt-6-sol which also price out of us-east-2 -- a region this entry has not been proven against should not be pinned here on a guess. The sibling tier gpt-6.2-astra is NOT onboarded: `mvp.discovery.reconcile` blocks it (and the current gpt-6-astra/gpt-6.1-sol) with `price_dimensions_unknown/unparseable_rate_card_row` -- its rate card carries new `_ultrafast`-suffixed rows (`cache_read_tokens_ultrafast` and friends) that `mvp.pricing_feeds.dimensions` does not recognise yet; that needs a dimensions-parser change and its own review, not a models.json entry. Invoked through the `bedrock-runtime` OpenAI-compatible endpoint, which is the one AWS recommends; `bedrock_model_id` carries the `us.` inference-profile prefix for the same reason every other OpenAI-family entry does."
+    },
+    {
+      "provider": "openai",
       "bedrock_model_id": "us.openai.gpt-5.6-terra",
       "bedrock_region": "us-east-2",
       "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
