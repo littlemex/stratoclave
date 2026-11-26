@@ -3,9 +3,9 @@
 # package listed here ends up in the shipped container.
 
 # FastAPI
-fastapi==0.162.7
+fastapi==0.165.0
 uvicorn[standard]==0.54.0
-python-multipart==0.0.33
+python-multipart==0.0.34
 
 # httpx is used at runtime by the backend to forward signed STS requests
 # and by tests; keep it in the runtime set.
@@ -21,7 +21,7 @@ httpx==0.28.1
 idna==3.20
 
 # AWS
-boto3==1.44.3
+boto3==1.44.9
 # Mints short-lived bearer tokens for the OpenAI-compatible surface on
 # bedrock-runtime (Responses and Chat Completions).
 # `expiry=timedelta(seconds=900)` (mvp/_openai_transport.py's DEFAULT_TOKEN_TTL) keeps
@@ -29,7 +29,7 @@ boto3==1.44.3
 aws-bedrock-token-generator==1.1.0
 
 # Utilities
-pydantic[email]==2.14.3
+pydantic[email]==2.14.4
 pydantic-settings==2.16.3
 python-dotenv==1.2.4
 
