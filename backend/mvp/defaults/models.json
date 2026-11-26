@@ -356,6 +356,7 @@
       "provider": "openai",
       "bedrock_model_id": "us.openai.gpt-6.2-sol",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "gpt-6.2-sol",
         "openai.gpt-6.2-sol",
