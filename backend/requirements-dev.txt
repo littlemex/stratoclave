@@ -31,7 +31,7 @@ moto[dynamodb,cognitoidp,sts]==5.2.5
 joserfc==1.8.0
 
 # Linting / formatting
-ruff==0.17.5
+ruff==0.17.6
 
 # Formal / property-based tests for the pooled-billing logic.
 # test_billing_formal_z3.py proves the concurrency invariants with an SMT
@@ -39,7 +39,7 @@ ruff==0.17.5
 # the reserve/settle/release/reap/set-limit lifecycle with Hypothesis against
 # billing/ledger.py (the executable spec of the DynamoDB money logic).
 z3-solver==5.4.1.0
-hypothesis==6.170.15
+hypothesis==6.170.17
 
 # Parses the machine-readable coverage.yaml each workshop scenario carries
 # (scenarios/_schema/coverage.py). Dev/CI only — the workshop tooling never
