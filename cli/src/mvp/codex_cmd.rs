@@ -699,6 +699,9 @@ pub(crate) fn codex_context_window_for(model: &str) -> u64 {
         "openai.gpt-5.5" | "gpt-5.5" => 400_000,
         "openai.gpt-5.6-sol" | "gpt-5.6-sol" => 400_000,
         "openai.gpt-5.6-terra" | "gpt-5.6-terra" => 400_000,
+        // AWS's own model card states 1,050,000 (max output 128,000), not the 400k the GPT-5.x
+        // family uses: https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-2-sol.html
+        "openai.gpt-6.2-sol" | "gpt-6.2-sol" => 1_050_000,
         _ => 200_000,
     }
 }
@@ -779,14 +782,14 @@ mod tests {
         );
         for id in ids {
             let short = id.trim_start_matches("openai.");
-            assert_eq!(
+            assert_ne!(
                 codex_context_window_for(&id),
-                400_000,
+                200_000,
                 "{id} is served by the gateway but falls back to the 200k default"
             );
-            assert_eq!(
+            assert_ne!(
                 codex_context_window_for(short),
-                400_000,
+                200_000,
                 "{short} (the short alias codex may be given) falls back to the 200k default"
             );
         }
@@ -930,6 +933,8 @@ mod tests {
         assert_eq!(codex_context_window_for("gpt-5.4"), 400_000);
         assert_eq!(codex_context_window_for("openai.gpt-5.5"), 400_000);
         assert_eq!(codex_context_window_for("gpt-5.5"), 400_000);
+        assert_eq!(codex_context_window_for("openai.gpt-6.2-sol"), 1_050_000);
+        assert_eq!(codex_context_window_for("gpt-6.2-sol"), 1_050_000);
         // Unknown model falls back to a non-zero default so codex
         // still has a finite budget to plan against.
         assert_eq!(codex_context_window_for("future-model"), 200_000);

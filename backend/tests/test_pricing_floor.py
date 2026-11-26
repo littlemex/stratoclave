@@ -62,6 +62,11 @@ MEASURED = {
     "haiku-3": (250_000, 1_250_000, 250_000, 312_500),
     "gpt-5.6-sol": (5_500_000, 33_000_000, 550_000, 6_875_000),
     "gpt-5.6-terra": (2_200_000, 13_200_000, 275_000, 3_437_500),
+    # GPT-6.2 Sol, from bedrock:ListFoundationModelAgreementOffers on 2026-11-26
+    # (in-region standard tier: input/output/cache_read/cache_write =
+    # 2.20/11.00/0.11/2.75 USD per MTok), cross-checked against the published
+    # model card's own pricing table the same day.
+    "gpt-6.2-sol": (2_200_000, 11_000_000, 110_000, 2_750_000),
     "grok": (2_200_000, 6_600_000, 550_000, 2_750_000),
     "gemma": (140_000, 400_000, 140_000, 175_000),
     "nemotron": (150_000, 650_000, 150_000, 187_500),
